@@ -82,6 +82,11 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
 
     // Connect on start
     this.connectMqtt().catch(e => this.console.error('MQTT connect error:', e));
+
+    // 🔻 chiusura pulita del client MQTT ai reload/stop del plugin
+    process.once('SIGTERM', () => { try { this.client?.end(true); } catch {} });
+    process.once('SIGINT',  () => { try { this.client?.end(true); } catch {} });
+    process.on('exit',      () => { try { this.client?.end(true); } catch {} });
   }
 
   // --- Settings UI ---

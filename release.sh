@@ -2,18 +2,13 @@
 set -euo pipefail
 
 # ---------------------------------------------
-# release.sh  —  Simple one-shot release helper
+# release.sh — Release helper (anon commits)
 # ---------------------------------------------
 # Usage:
 #   ./release.sh [patch|minor|major|<version>] [-m "commit msg"] [-t <npm-tag>] [--force]
 #
-# Examples:
-#   ./release.sh patch
-#   ./release.sh minor -m "feat: multi partition" -t beta
-#   NPM_OTP=123456 ./release.sh 1.0.4
-#
 # Env:
-#   NPM_OTP  -> one-time password for npm 2FA (optional)
+#   NPM_OTP -> one-time password for npm 2FA (optional)
 # ---------------------------------------------
 
 BUMP="${1:-patch}"
@@ -23,7 +18,19 @@ MSG="chore(release): bump"
 NPM_TAG="latest"
 FORCE_PUSH="no"
 
-# Parse simple flags
+# === Identità ANONIMA per i commit/tag di questo script ===
+# Suggerito: abilita su GitHub "Keep my email addresses private" e usa la tua noreply:
+#   <id>+<user>@users.noreply.github.com   oppure   <user>@users.noreply.github.com
+ANON_NAME="mrMiimo"
+ANON_EMAIL="mrMiimo@users.noreply.github.com"
+
+# Applica l'identità solo alle operazioni di questo script:
+export GIT_AUTHOR_NAME="${ANON_NAME}"
+export GIT_AUTHOR_EMAIL="${ANON_EMAIL}"
+export GIT_COMMITTER_NAME="${ANON_NAME}"
+export GIT_COMMITTER_EMAIL="${ANON_EMAIL}"
+
+# Parse flags
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -m|--message) MSG="$2"; shift 2 ;;
@@ -33,10 +40,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Ensure we are in a git repo
 git rev-parse --show-toplevel >/dev/null
 
-# Normalize .gitignore (idempotente)
+# .gitignore (idempotente)
 {
   echo 'node_modules/'
   echo 'dist/'
@@ -45,44 +51,39 @@ git rev-parse --show-toplevel >/dev/null
   echo '.DS_Store'
 } | sort -u | tee .gitignore >/dev/null
 
-# Untrack artefacts se servisse
 git rm -r --cached node_modules dist out *.tgz 2>/dev/null || true
 
-# Commit pending (se ci sono cambi)
+# Commit pending (se ci sono modifiche)
 if ! git diff --quiet || ! git diff --cached --quiet; then
   git add -A
   git commit -m "${MSG}"
 fi
 
-# Allinea con remoto main (se esiste)
+# Allinea a origin/main se esiste
 if git ls-remote --exit-code --heads origin main >/dev/null 2>&1; then
   git fetch origin
-  # rebase "pulito"; se conflitti, fermiamo con messaggio chiaro
   set +e
   git rebase origin/main
-  REBASE_RC=$?
+  RC=$?
   set -e
-  if [[ $REBASE_RC -ne 0 ]]; then
-    echo "❌ Rebase fallito. Risolvi i conflitti e poi: git rebase --continue"
+  if [[ $RC -ne 0 ]]; then
+    echo "❌ Rebase fallito. Risolvi conflitti e poi: git rebase --continue"
     exit 1
   fi
 fi
 
-# Build (produce dist/plugin.zip)
+# Build (crea dist/plugin.zip)
 echo "▶️  Building…"
 npm run build
-
-# Verifica artefatto richiesto da Scrypted
 test -f dist/plugin.zip || { echo "❌ dist/plugin.zip mancante"; exit 1; }
 
-# Bump versione (patch/minor/major o esplicita)
+# Bump versione
 echo "▶️  Bumping version: ${BUMP}"
 npm version "${BUMP}" --no-git-tag-version
-
 VERSION="$(node -p "require('./package.json').version")"
 echo "📦 Version: v${VERSION}"
 
-# Publish su npm
+# Publish npm
 PUBLISH_CMD=(npm publish --access public --tag "${NPM_TAG}")
 if [[ -n "${NPM_OTP:-}" ]]; then
   PUBLISH_CMD+=("--otp" "${NPM_OTP}")
@@ -90,12 +91,13 @@ fi
 echo "▶️  Publishing to npm (tag: ${NPM_TAG})…"
 "${PUBLISH_CMD[@]}"
 
-# Commit il bump, tag e push
+# Commit del bump (se necessario), tag e push
 git add package.json package-lock.json 2>/dev/null || true
 if ! git diff --quiet --cached; then
   git commit -m "chore(release): v${VERSION}"
 fi
 
+# Il tag userà ANON_NAME/ANON_EMAIL perché già esportati sopra
 git tag -a "v${VERSION}" -m "release v${VERSION}"
 
 if [[ "${FORCE_PUSH}" == "yes" ]]; then
