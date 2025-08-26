@@ -10,16 +10,16 @@ Controlla e sincronizza un sistema Paradox via MQTT (PAI) esponendolo come **Sec
 
 ## Configurazione (Settings)
 ### MQTT
-- **Broker URL** es. `mqtt://192.168.1.10:1883`
+- **Broker URL** es. `mqtt://0.0.0.0:1883`
 - Username/Password (se necessari)
 - Client ID, TLS, Reject Unauthorized
 
 ### Topics
-- **Set Target State (publish)**: es. `paradox/control/partitions/Area_1`
-- **Get Target State (subscribe)**: `paradox/states/partitions/Area_1/target_state`
-- **Get Current State (subscribe)**: `paradox/states/partitions/Area_1/current_state`
-- **Get Status Tampered (subscribe)**: `paradox/states/system/troubles/zone_tamper_trouble`
-- **Get Online (subscribe)**: `paradox/interface/availability`
+- **Set Target State (publish)**: es. `SYSTEM/control/partitions/Area_1`
+- **Get Target State (subscribe)**: `SYSTEM/states/partitions/Area_1/target_state`
+- **Get Current State (subscribe)**: `SYSTEM/states/partitions/Area_1/current_state`
+- **Get Status Tampered (subscribe)**: `SYSTEM/states/system/troubles/zone_tamper_trouble`
+- **Get Online (subscribe)**: `SYSTEM/interface/availability`
 
 ### Publish Options
 - QoS / Retain
@@ -35,13 +35,13 @@ Controlla e sincronizza un sistema Paradox via MQTT (PAI) esponendolo come **Sec
 - In uscita, puoi cambiare i payload per aderire al tuo PAI.
 
 ## Mappa consigliata per PAI (esempio)
-- **Set**: `paradox/control/partitions/Area_1`
+- **Set**: `SYSTEM/control/partitions/Area_1`
   - Disarm → `disarm`
   - Home → `arm_home`
   - Away → `arm_away`
   - Night → `arm_night`
-- **Get Target**: `paradox/states/partitions/Area_1/target_state`
-- **Get Current**: `paradox/states/partitions/Area_1/current_state`
-- **Tamper**: `paradox/states/system/troubles/zone_tamper_trouble` (`true`/`false`)
-- **Online**: `paradox/interface/availability` (`online`/`offline`)
+- **Get Target**: `SYSTEM/states/partitions/Area_1/target_state`
+- **Get Current**: `SYSTEM/states/partitions/Area_1/current_state`
+- **Tamper**: `SYSTEM/states/system/troubles/zone_tamper_trouble` (`true`/`false`)
+- **Online**: `SYSTEM/interface/availability` (`online`/`offline`)
 
