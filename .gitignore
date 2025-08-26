@@ -5,3 +5,8 @@ out/
 .npmrc
 .env
 .DS_Store
+node_modules/
+dist/
+out/
+*.tgz
+.DS_Store
