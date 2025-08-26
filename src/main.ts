@@ -98,7 +98,7 @@ abstract class BaseMqttSensor extends ScryptedDeviceBase implements Online, Tamp
   constructor(nativeId: string, cfg: SensorConfig) {
     super(nativeId);
     this.cfg = cfg;
-    // ⚠️ Non impostare stati qui: il discovery non è ancora completato
+    // non impostare stati qui: l'annuncio device deve avvenire prima
   }
 
   /** Called by parent on each MQTT message */
@@ -126,7 +126,7 @@ abstract class BaseMqttSensor extends ScryptedDeviceBase implements Online, Tamp
       const n = clamp(parseFloat(p), 0, 100);
       if (isFinite(n)) (this as any).batteryLevel = n;
     } else if (topic === this.cfg.topics.lowBattery && !this.cfg.topics.batteryLevel) {
-      // Solo se abbiamo il topic lowBattery e NON c'è un batteryLevel numerico:
+      // Solo se abbiamo lowBattery (booleano) ma NON batteryLevel:
       // True  -> 10% (warning)
       // False -> 100% (ok)
       (this as any).batteryLevel = truthy(np) ? 10 : 100;
@@ -223,10 +223,19 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     } catch {}
   }
 
+  // helpers persistenza
+  private saveSensorsToStorage() {
+    try {
+      this.storage.setItem('sensorsJson', JSON.stringify(this.sensorsCfg));
+    } catch (e) {
+      this.console.error('saveSensorsToStorage error', e);
+    }
+  }
+
   /** ---- Settings UI ---- */
 
   async getSettings(): Promise<Setting[]> {
-    return [
+    const out: Setting[] = [
       // MQTT Core
       { group: 'MQTT', key: 'brokerUrl', title: 'Broker URL', placeholder: 'mqtt://127.0.0.1:1883', value: this.storage.getItem('brokerUrl') || 'mqtt://127.0.0.1:1883' },
       { group: 'MQTT', key: 'username', title: 'Username', type: 'string', value: this.storage.getItem('username') || '' },
@@ -244,27 +253,127 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
 
       { group: 'Publish Options', key: 'qos', title: 'QoS', type: 'integer', value: parseInt(this.storage.getItem('qos') || '0') },
       { group: 'Publish Options', key: 'retain', title: 'Retain', type: 'boolean', value: this.storage.getItem('retain') === 'true' },
-
-      { group: 'Outgoing Payloads', key: 'payloadDisarm', title: 'Payload Disarm', value: this.storage.getItem('payloadDisarm') || DEFAULT_OUTGOING[SecuritySystemMode.Disarmed] },
-      { group: 'Outgoing Payloads', key: 'payloadHome', title: 'Payload HomeArmed', value: this.storage.getItem('payloadHome') || DEFAULT_OUTGOING[SecuritySystemMode.HomeArmed] },
-      { group: 'Outgoing Payloads', key: 'payloadAway', title: 'Payload AwayArmed', value: this.storage.getItem('payloadAway') || DEFAULT_OUTGOING[SecuritySystemMode.AwayArmed] },
-      { group: 'Outgoing Payloads', key: 'payloadNight', title: 'Payload NightArmed', value: this.storage.getItem('payloadNight') || DEFAULT_OUTGOING[SecuritySystemMode.NightArmed] },
-
-      // Sensors config (JSON)
-      {
-        group: 'Sensors',
-        key: 'sensorsJson',
-        title: 'Sensors JSON (contact/motion/occupancy)',
-        description: 'Definisci i sensori e i topic MQTT (vedi README). Incolla JSON; le interruzioni di riga sono accettate.',
-        type: 'string',
-        value: this.storage.getItem('sensorsJson') || '[\n  {\n    "id": "front-door",\n    "name": "Front Door",\n    "kind": "contact",\n    "topics": { "contact": "SYSTEM/zones/front/contact" }\n  }\n]'
-      },
     ];
+
+    // ---- UI Add Sensor ----
+    out.push(
+      { group: 'Add Sensor', key: 'new.id', title: 'New Sensor ID', placeholder: 'porta-ingresso', value: this.storage.getItem('new.id') || '' },
+      { group: 'Add Sensor', key: 'new.name', title: 'Name', placeholder: 'Porta Ingresso', value: this.storage.getItem('new.name') || '' },
+      { group: 'Add Sensor', key: 'new.kind', title: 'Type', value: this.storage.getItem('new.kind') || 'contact', choices: ['contact', 'motion', 'occupancy'] as any },
+      { group: 'Add Sensor', key: 'new.create', title: 'Create sensor', type: 'boolean', description: 'Compila i campi sopra e attiva per creare.' },
+    );
+
+    // ---- UI per sensori esistenti ----
+    for (const cfg of this.sensorsCfg) {
+      const gid = `Sensor: ${cfg.name} [${cfg.id}]`;
+
+      out.push(
+        { group: gid, key: `sensor.${cfg.id}.name`, title: 'Name', value: cfg.name },
+        { group: gid, key: `sensor.${cfg.id}.kind`, title: 'Type', value: cfg.kind, choices: ['contact', 'motion', 'occupancy'] as any },
+      );
+
+      // primary per tipo
+      if (cfg.kind === 'contact') {
+        out.push({ group: gid, key: `sensor.${cfg.id}.topic.contact`, title: 'Contact State Topic', value: cfg.topics.contact || '', placeholder: 'paradox/states/zones/XYZ/open' });
+      } else if (cfg.kind === 'motion') {
+        out.push({ group: gid, key: `sensor.${cfg.id}.topic.motion`, title: 'Motion Detected Topic', value: cfg.topics.motion || '', placeholder: 'paradox/states/zones/XYZ/open' });
+      } else {
+        out.push({ group: gid, key: `sensor.${cfg.id}.topic.occupancy`, title: 'Occupancy Detected Topic', value: cfg.topics.occupancy || '', placeholder: 'paradox/states/zones/XYZ/open' });
+      }
+
+      // extra opzionali
+      out.push(
+        { group: gid, key: `sensor.${cfg.id}.topic.batteryLevel`, title: 'Battery Level Topic (0..100)', value: cfg.topics.batteryLevel || '' },
+        { group: gid, key: `sensor.${cfg.id}.topic.lowBattery`,  title: 'Low Battery Topic (bool)', value: cfg.topics.lowBattery || '' },
+        { group: gid, key: `sensor.${cfg.id}.topic.tamper`,      title: 'Tamper Topic', value: cfg.topics.tamper || '' },
+        { group: gid, key: `sensor.${cfg.id}.topic.online`,      title: 'Online Topic', value: cfg.topics.online || '' },
+        { group: gid, key: `sensor.${cfg.id}.remove`,            title: 'Remove sensor', type: 'boolean' },
+      );
+    }
+
+    return out;
   }
 
   async putSetting(key: string, value: string | number | boolean): Promise<void> {
+    // salva sempre nella storage la value del campo (così resta in UI)
     this.storage.setItem(key, String(value));
+
+    // --- Add Sensor workflow ---
+    if (key === 'new.create' && String(value) === 'true') {
+      const id = (this.storage.getItem('new.id') || '').trim();
+      const name = (this.storage.getItem('new.name') || '').trim() || id;
+      const kind = (this.storage.getItem('new.kind') || 'contact').trim() as SensorKind;
+
+      if (!id) {
+        this.console.warn('Create sensor: id mancante');
+        return;
+      }
+      if (this.sensorsCfg.find(s => s.id === id)) {
+        this.console.warn('Create sensor: id già esistente');
+        return;
+      }
+
+      this.sensorsCfg.push({ id, name, kind, topics: {} });
+      this.saveSensorsToStorage();
+
+      // pulisci i campi "new.*"
+      this.storage.removeItem('new.id');
+      this.storage.removeItem('new.name');
+      this.storage.removeItem('new.kind');
+      this.storage.removeItem('new.create');
+
+      await this.discoverSensors();
+      await this.connectMqtt(true);
+      return;
+    }
+
+    // --- Edit/Remove sensore esistente ---
+    const m = key.match(/^sensor\.([^\.]+)\.(.+)$/);
+    if (m) {
+      const sid = m[1];
+      const prop = m[2];
+      const cfg = this.sensorsCfg.find(s => s.id === sid);
+      if (!cfg) {
+        this.console.warn('putSetting: sensor non trovato', sid);
+        return;
+      }
+
+      if (prop === 'remove' && String(value) === 'true') {
+        // elimina
+        this.sensorsCfg = this.sensorsCfg.filter(s => s.id !== sid);
+        this.saveSensorsToStorage();
+
+        try {
+          this.devices.delete(`sensor:${sid}`);
+          deviceManager.onDeviceRemoved?.(`sensor:${sid}`);
+        } catch {}
+
+        // pulisci flag
+        this.storage.removeItem(key);
+
+        await this.discoverSensors();
+        await this.connectMqtt(true);
+        return;
+      }
+
+      if (prop === 'name') {
+        cfg.name = String(value);
+      } else if (prop === 'kind') {
+        cfg.kind = String(value) as SensorKind;
+      } else if (prop.startsWith('topic.')) {
+        const tk = prop.substring('topic.'.length) as keyof SensorTopics;
+        (cfg.topics as any)[tk] = String(value).trim();
+      }
+
+      this.saveSensorsToStorage();
+      await this.discoverSensors();
+      await this.connectMqtt(true);
+      return;
+    }
+
+    // --- Altro (MQTT / Alarm settings) ---
     if (key === 'sensorsJson') {
+      // non più mostrato, ma se presente da vecchie versioni
       this.loadSensorsFromStorage();
       await this.discoverSensors();
       await this.connectMqtt(true);
@@ -308,11 +417,9 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     // 1) Prepara i manifest (niente istanze qui)
     const manifests = this.sensorsCfg.map(cfg => {
       const nativeId = `sensor:${cfg.id}`;
-
       const t = cfg.topics || {};
-      const interfaces: ScryptedInterface[] = [
-        ScryptedInterface.Online,
-      ];
+
+      const interfaces: ScryptedInterface[] = [ ScryptedInterface.Online ];
 
       // Tamper solo se c'è un topic tamper
       if (t.tamper) interfaces.push(ScryptedInterface.TamperSensor);
@@ -327,15 +434,10 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
         interfaces.push(ScryptedInterface.Battery);
       }
 
-      return {
-        nativeId,
-        name: cfg.name,
-        type: ScryptedDeviceType.Sensor,
-        interfaces,
-      };
+      return { nativeId, name: cfg.name, type: ScryptedDeviceType.Sensor, interfaces };
     });
 
-    // 2) Annuncia i device
+    // 2) Annuncio
     const dmAny: any = deviceManager as any;
     if (typeof dmAny.onDevicesChanged === 'function') {
       dmAny.onDevicesChanged({ devices: manifests });
@@ -347,7 +449,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
       }
     }
 
-    // 3) Istanzia/aggiorna le classi DOPO l’annuncio
+    // 3) Istanzia/aggiorna DOPO l’annuncio
     for (const cfg of this.sensorsCfg) {
       const nativeId = `sensor:${cfg.id}`;
       let dev = this.devices.get(nativeId);
@@ -360,7 +462,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
         (dev as any).cfg = cfg;
       }
 
-      // ★ Default “OK” se abbiamo Battery ma nessun valore ancora ricevuto
+      // Default “OK” se abbiamo Battery ma nessun valore ancora ricevuto
       const hasBattery = !!(cfg.topics.batteryLevel || cfg.topics.lowBattery);
       if (hasBattery && (dev as any).batteryLevel === undefined) {
         (dev as any).batteryLevel = 100;
