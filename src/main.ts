@@ -253,9 +253,8 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
         group: 'Sensors',
         key: 'sensorsJson',
         title: 'Sensors JSON (contact/motion/occupancy)',
-        description: 'Definisci i sensori e i topic MQTT (vedi README).',
+        description: 'Definisci i sensori e i topic MQTT (vedi README). Incolla JSON; le interruzioni di riga sono accettate.',
         type: 'string',
-        multiline: true,
         value: this.storage.getItem('sensorsJson') || '[\n  {\n    "id": "front-door",\n    "name": "Front Door",\n    "kind": "contact",\n    "topics": { "contact": "SYSTEM/zones/front/contact" }\n  }\n]'
       },
     ];
@@ -276,6 +275,20 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
 
   async getDevice(nativeId: string) {
     return this.devices.get(nativeId);
+  }
+
+  async releaseDevice(id: string, nativeId: string): Promise<void> {
+    try {
+      // chiudi e rimuovi l’istanza locale se esiste
+      const dev = this.devices.get(nativeId);
+      if (dev) {
+        this.devices.delete(nativeId);
+      }
+      // notifica (best effort) la rimozione al device manager
+      try { deviceManager.onDeviceRemoved?.(nativeId); } catch {}
+    } catch (e) {
+      this.console.warn('releaseDevice error', e);
+    }
   }
 
   private loadSensorsFromStorage() {
@@ -325,7 +338,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     }
 
     // drop removed sensors
-    for (const [nativeId, dev] of this.devices) {
+    for (const [nativeId] of this.devices) {
       if (!announced.has(nativeId)) {
         try {
           this.devices.delete(nativeId);
