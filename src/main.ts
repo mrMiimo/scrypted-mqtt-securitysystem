@@ -304,76 +304,85 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     }
   }
 
-/** ===== discoverSensors con batch/fallback (FIX type) ===== */
-private async discoverSensors() {
-  // Prepara i manifest e istanzia/aggiorna le classi locali
-  const manifests = this.sensorsCfg.map(cfg => {
-    const nativeId = `sensor:${cfg.id}`;
+  /** ===== discoverSensors con interfacce dinamiche (Battery/Tamper opzionali) ===== */
+  private async discoverSensors() {
+    const manifests = this.sensorsCfg.map(cfg => {
+      const nativeId = `sensor:${cfg.id}`;
+      const t = cfg.topics || {};
 
-    let interfaces: ScryptedInterface[] = [
-      ScryptedInterface.Online,
-      ScryptedInterface.TamperSensor,
-      ScryptedInterface.Battery,
-    ];
-    // Il tipo RESTA generico "Sensor" per compatibilità SDK,
-    // le capacità sono date dalle interfacce.
-    const type: ScryptedDeviceType = ScryptedDeviceType.Sensor;
+      // Interfacce di base: Online sempre
+      const interfaces: ScryptedInterface[] = [ScryptedInterface.Online];
 
-    switch (cfg.kind) {
-      case 'contact':
-        interfaces = [ScryptedInterface.EntrySensor, ...interfaces];
-        break;
-      case 'motion':
-        interfaces = [ScryptedInterface.MotionSensor, ...interfaces];
-        break;
-      case 'occupancy':
-        interfaces = [ScryptedInterface.OccupancySensor, ...interfaces];
-        break;
-    }
+      // Aggiungi primaria in base al kind
+      switch (cfg.kind) {
+        case 'contact':
+          interfaces.unshift(ScryptedInterface.EntrySensor);
+          break;
+        case 'motion':
+          interfaces.unshift(ScryptedInterface.MotionSensor);
+          break;
+        case 'occupancy':
+          interfaces.unshift(ScryptedInterface.OccupancySensor);
+          break;
+      }
 
-    let dev = this.devices.get(nativeId);
-    if (!dev) {
-      if (cfg.kind === 'contact') dev = new ContactMqttSensor(nativeId, cfg);
-      else if (cfg.kind === 'motion') dev = new MotionMqttSensor(nativeId, cfg);
-      else dev = new OccupancyMqttSensor(nativeId, cfg);
-      this.devices.set(nativeId, dev);
+      // Tamper solo se presente il topic
+      if (t.tamper) interfaces.push(ScryptedInterface.TamperSensor);
+
+      // Battery solo se presente batteryLevel o lowBattery
+      if (t.batteryLevel || t.lowBattery) interfaces.push(ScryptedInterface.Battery);
+
+      // Tipo generico "Sensor": le capacità sono date dalle interfacce
+      const type: ScryptedDeviceType = ScryptedDeviceType.Sensor;
+
+      // create/update instance
+      let dev = this.devices.get(nativeId);
+      if (!dev) {
+        if (cfg.kind === 'contact') dev = new ContactMqttSensor(nativeId, cfg);
+        else if (cfg.kind === 'motion') dev = new MotionMqttSensor(nativeId, cfg);
+        else dev = new OccupancyMqttSensor(nativeId, cfg);
+        this.devices.set(nativeId, dev);
+      } else {
+        (dev as any).cfg = cfg;
+        // se non c'è più batteria nei topic, pulisci eventuale valore residuo
+        if (!(t.batteryLevel || t.lowBattery)) {
+          try { (dev as any).batteryLevel = undefined; } catch {}
+        }
+      }
+
+      return {
+        nativeId,
+        name: cfg.name,
+        type,
+        interfaces,
+      };
+    });
+
+    // Annuncio in batch se disponibile, altrimenti uno per volta con un piccolo delay
+    const dm: any = deviceManager as any;
+    if (typeof dm.onDevicesChanged === 'function') {
+      dm.onDevicesChanged({ devices: manifests });
+      this.console.log('Annunciati (batch):', manifests.map(m => m.nativeId).join(', '));
     } else {
-      (dev as any).cfg = cfg;
+      for (const m of manifests) {
+        deviceManager.onDeviceDiscovered(m);
+        this.console.log('Annunciato:', m.nativeId);
+        await delay(50);
+      }
     }
 
-    return {
-      nativeId,
-      name: cfg.name,
-      type,
-      interfaces,
-    };
-  });
-
-  // Annuncio in batch se disponibile, altrimenti uno per volta con un piccolo delay
-  const dm: any = deviceManager as any;
-  if (typeof dm.onDevicesChanged === 'function') {
-    dm.onDevicesChanged({ devices: manifests });
-    this.console.log('Annunciati (batch):', manifests.map(m => m.nativeId).join(', '));
-  } else {
-    for (const m of manifests) {
-      deviceManager.onDeviceDiscovered(m);
-      this.console.log('Annunciato:', m.nativeId);
-      await new Promise(res => setTimeout(res, 50));
+    // Rimuovi eventuali sensori non più presenti
+    const announced = new Set(manifests.map(m => m.nativeId));
+    for (const [nativeId] of this.devices) {
+      if (!announced.has(nativeId)) {
+        try {
+          this.devices.delete(nativeId);
+          deviceManager.onDeviceRemoved?.(nativeId);
+          this.console.log('Rimosso:', nativeId);
+        } catch {}
+      }
     }
   }
-
-  // Rimuovi eventuali sensori non più presenti
-  const announced = new Set(manifests.map(m => m.nativeId));
-  for (const [nativeId] of this.devices) {
-    if (!announced.has(nativeId)) {
-      try {
-        this.devices.delete(nativeId);
-        deviceManager.onDeviceRemoved?.(nativeId);
-        this.console.log('Rimosso:', nativeId);
-      } catch {}
-    }
-  }
-}
 
   /** ---- MQTT ---- */
 
