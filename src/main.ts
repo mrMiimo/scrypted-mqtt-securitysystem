@@ -260,7 +260,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
       { group: 'Add Sensor', key: 'new.id', title: 'New Sensor ID', placeholder: 'porta-ingresso', value: this.storage.getItem('new.id') || '' },
       { group: 'Add Sensor', key: 'new.name', title: 'Name', placeholder: 'Porta Ingresso', value: this.storage.getItem('new.name') || '' },
       { group: 'Add Sensor', key: 'new.kind', title: 'Type', value: this.storage.getItem('new.kind') || 'contact', choices: ['contact', 'motion', 'occupancy'] as any },
-      { group: 'Add Sensor', key: 'new.create', title: 'Create sensor', type: 'boolean', description: 'Compila i campi sopra e attiva per creare.' },
+      { group: 'Add Sensor', key: 'new.create', title: 'Create sensor', type: 'boolean', description: 'Fill the fields above and toggle this on to create the sensor. After creation, restart this plugin to see the accessory listed below. To show it in HomeKit, restart the HomeKit plugin as well.' },
     );
 
     // ---- UI per sensori esistenti ----
