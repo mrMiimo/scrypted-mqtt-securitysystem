@@ -36,9 +36,6 @@ function normalize(s: string) {
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
-function delay(ms: number) {
-  return new Promise(res => setTimeout(res, ms));
-}
 
 /** SecuritySystem outgoing defaults (PAI-like) */
 const DEFAULT_OUTGOING: Record<SecuritySystemMode, string> = {
@@ -101,7 +98,7 @@ abstract class BaseMqttSensor extends ScryptedDeviceBase implements Online, Tamp
   constructor(nativeId: string, cfg: SensorConfig) {
     super(nativeId);
     this.cfg = cfg;
-    this.online = this.online ?? true;
+    // ⚠️ Non toccare stati nel costruttore (discovery non ancora completata)
   }
 
   /** Called by parent on each MQTT message */
@@ -211,7 +208,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
 
     // Load sensors config and announce devices
     this.loadSensorsFromStorage();
-    this.discoverSensors();
+    this.discoverSensors().catch(e => this.console.error('discoverSensors error', e));
 
     // Connect on start
     this.connectMqtt().catch(e => this.console.error('MQTT connect error:', e));
@@ -280,7 +277,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     return this.devices.get(nativeId);
   }
 
-  async releaseDevice(id: string, nativeId: string): Promise<void> {
+  async releaseDevice(_id: string, nativeId: string): Promise<void> {
     try {
       const dev = this.devices.get(nativeId);
       if (dev) {
@@ -304,38 +301,51 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     }
   }
 
-  /** ===== discoverSensors con interfacce dinamiche (Battery/Tamper opzionali) ===== */
+  /** ===== discoverSensors: annuncia PRIMA, istanzia DOPO ===== */
   private async discoverSensors() {
+    // 1) Prepara i manifest (niente istanze qui)
     const manifests = this.sensorsCfg.map(cfg => {
       const nativeId = `sensor:${cfg.id}`;
+
+      // interfacce dinamiche
       const t = cfg.topics || {};
+      const interfaces: ScryptedInterface[] = [
+        ScryptedInterface.Online,
+        ScryptedInterface.TamperSensor,
+      ];
 
-      // Interfacce di base: Online sempre
-      const interfaces: ScryptedInterface[] = [ScryptedInterface.Online];
+      if (cfg.kind === 'contact') interfaces.unshift(ScryptedInterface.EntrySensor);
+      else if (cfg.kind === 'motion') interfaces.unshift(ScryptedInterface.MotionSensor);
+      else interfaces.unshift(ScryptedInterface.OccupancySensor);
 
-      // Aggiungi primaria in base al kind
-      switch (cfg.kind) {
-        case 'contact':
-          interfaces.unshift(ScryptedInterface.EntrySensor);
-          break;
-        case 'motion':
-          interfaces.unshift(ScryptedInterface.MotionSensor);
-          break;
-        case 'occupancy':
-          interfaces.unshift(ScryptedInterface.OccupancySensor);
-          break;
+      // aggiungi Battery solo se previsto
+      if (t.batteryLevel || t.lowBattery) {
+        interfaces.push(ScryptedInterface.Battery);
       }
 
-      // Tamper solo se presente il topic
-      if (t.tamper) interfaces.push(ScryptedInterface.TamperSensor);
+      return {
+        nativeId,
+        name: cfg.name,
+        type: ScryptedDeviceType.Sensor,
+        interfaces,
+      };
+    });
 
-      // Battery solo se presente batteryLevel o lowBattery
-      if (t.batteryLevel || t.lowBattery) interfaces.push(ScryptedInterface.Battery);
+    // 2) Annuncia i device
+    const dmAny: any = deviceManager as any;
+    if (typeof dmAny.onDevicesChanged === 'function') {
+      dmAny.onDevicesChanged({ devices: manifests });
+      this.console.log('Annunciati (batch):', manifests.map(m => m.nativeId).join(', '));
+    } else {
+      for (const m of manifests) {
+        deviceManager.onDeviceDiscovered(m);
+        this.console.log('Annunciato:', m.nativeId);
+      }
+    }
 
-      // Tipo generico "Sensor": le capacità sono date dalle interfacce
-      const type: ScryptedDeviceType = ScryptedDeviceType.Sensor;
-
-      // create/update instance
+    // 3) Istanzia/aggiorna le classi DOPO l’annuncio
+    for (const cfg of this.sensorsCfg) {
+      const nativeId = `sensor:${cfg.id}`;
       let dev = this.devices.get(nativeId);
       if (!dev) {
         if (cfg.kind === 'contact') dev = new ContactMqttSensor(nativeId, cfg);
@@ -344,34 +354,10 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
         this.devices.set(nativeId, dev);
       } else {
         (dev as any).cfg = cfg;
-        // se non c'è più batteria nei topic, pulisci eventuale valore residuo
-        if (!(t.batteryLevel || t.lowBattery)) {
-          try { (dev as any).batteryLevel = undefined; } catch {}
-        }
-      }
-
-      return {
-        nativeId,
-        name: cfg.name,
-        type,
-        interfaces,
-      };
-    });
-
-    // Annuncio in batch se disponibile, altrimenti uno per volta con un piccolo delay
-    const dm: any = deviceManager as any;
-    if (typeof dm.onDevicesChanged === 'function') {
-      dm.onDevicesChanged({ devices: manifests });
-      this.console.log('Annunciati (batch):', manifests.map(m => m.nativeId).join(', '));
-    } else {
-      for (const m of manifests) {
-        deviceManager.onDeviceDiscovered(m);
-        this.console.log('Annunciato:', m.nativeId);
-        await delay(50);
       }
     }
 
-    // Rimuovi eventuali sensori non più presenti
+    // 4) Rimuovi quelli spariti
     const announced = new Set(manifests.map(m => m.nativeId));
     for (const [nativeId] of this.devices) {
       if (!announced.has(nativeId)) {
@@ -421,7 +407,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
 
     // sensors
     for (const s of this.sensorsCfg) {
-      const t = s.topics;
+      const t = s.topics || {};
       [t.contact, t.motion, t.occupancy, t.batteryLevel, t.lowBattery, t.tamper, t.online]
         .filter(Boolean)
         .forEach(x => subs.add(String(x)));
