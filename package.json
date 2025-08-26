@@ -22,6 +22,8 @@
     "package.json"
   ],
   "keywords": [
+    "scrypted",
+    "plugin",
     "mqtt",
     "paradox",
     "paradox-alarm",
