@@ -17,7 +17,7 @@ Control and sync a Paradox (PAI/PAI-MQTT–like) alarm via MQTT, exposed in Scry
 npm i
 npm run build       # produces dist/plugin.zip
 ```
-Then in **Scrypted → Manage Plugins → Install from file** and upload `dist/plugin.zip`.
+Then in **Scrypted → Manage Plugins → Install
 
 > Alternatively: `npm run deploy` (requires `npx scrypted-cli login` one time).
 
