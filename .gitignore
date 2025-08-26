@@ -1,0 +1,11 @@
+
+node_modules/
+
+node_modules/
+
+dist/
+out/
+*.tgz
+.npmrc
+.env
+.DS_Store

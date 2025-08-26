@@ -1,0 +1,34 @@
+{
+  "name": "@rfranzoi/scrypted-mqtt-securitysystem",
+  "version": "1.0.3",
+  "description": "Scrypted plugin: Paradox Security System via MQTT (PAI/PAI-MQTT style).",
+  "license": "MIT",
+  "main": "dist/main.nodejs.js",
+  "type": "commonjs",
+  "scripts": {
+    "build": "rm -rf dist && scrypted-webpack --target node || true && node -e \"const fs=require('fs'),path=require('path');const cand=['dist/main.nodejs.js','out/main.nodejs.js','main.nodejs.js'];const dest='dist/main.nodejs.js';const src=cand.find(f=>fs.existsSync(f));if(!src){console.error('main.nodejs.js non trovato (dist/out/root).');process.exit(1);}fs.mkdirSync(path.dirname(dest),{recursive:true});if(src!==dest)fs.copyFileSync(src,dest);\" && (cd dist && rm -f plugin.zip && zip -q -r plugin.zip main.nodejs.js)",
+    "prepublishOnly": "npm run build && test -f dist/plugin.zip"
+  },
+  "dependencies": {
+    "@scrypted/sdk": "^0.5.0",
+    "mqtt": "^5.3.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0"
+  },
+  "files": [
+    "dist/plugin.zip",
+    "README.md",
+    "package.json"
+  ],
+  "scrypted": {
+    "name": "Paradox MQTT SecuritySystem",
+    "type": "Device",
+    "interfaces": [
+      "SecuritySystem",
+      "Settings",
+      "TamperSensor",
+      "Online"
+    ]
+  }
+}
