@@ -98,7 +98,7 @@ abstract class BaseMqttSensor extends ScryptedDeviceBase implements Online, Tamp
   constructor(nativeId: string, cfg: SensorConfig) {
     super(nativeId);
     this.cfg = cfg;
-    // ⚠️ Non toccare stati nel costruttore (discovery non ancora completata)
+    // ⚠️ Non impostare stati qui: il discovery non è ancora completato
   }
 
   /** Called by parent on each MQTT message */
@@ -126,7 +126,9 @@ abstract class BaseMqttSensor extends ScryptedDeviceBase implements Online, Tamp
       const n = clamp(parseFloat(p), 0, 100);
       if (isFinite(n)) (this as any).batteryLevel = n;
     } else if (topic === this.cfg.topics.lowBattery && !this.cfg.topics.batteryLevel) {
-      // sintetizza se non c'è batteryLevel
+      // Solo se abbiamo il topic lowBattery e NON c'è un batteryLevel numerico:
+      // True  -> 10% (warning)
+      // False -> 100% (ok)
       (this as any).batteryLevel = truthy(np) ? 10 : 100;
     }
 
@@ -307,18 +309,20 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     const manifests = this.sensorsCfg.map(cfg => {
       const nativeId = `sensor:${cfg.id}`;
 
-      // interfacce dinamiche
       const t = cfg.topics || {};
       const interfaces: ScryptedInterface[] = [
         ScryptedInterface.Online,
-        ScryptedInterface.TamperSensor,
       ];
 
+      // Tamper solo se c'è un topic tamper
+      if (t.tamper) interfaces.push(ScryptedInterface.TamperSensor);
+
+      // Interfaccia primaria
       if (cfg.kind === 'contact') interfaces.unshift(ScryptedInterface.EntrySensor);
       else if (cfg.kind === 'motion') interfaces.unshift(ScryptedInterface.MotionSensor);
       else interfaces.unshift(ScryptedInterface.OccupancySensor);
 
-      // aggiungi Battery solo se previsto
+      // Battery solo se previsto
       if (t.batteryLevel || t.lowBattery) {
         interfaces.push(ScryptedInterface.Battery);
       }
@@ -354,6 +358,12 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
         this.devices.set(nativeId, dev);
       } else {
         (dev as any).cfg = cfg;
+      }
+
+      // ★ Default “OK” se abbiamo Battery ma nessun valore ancora ricevuto
+      const hasBattery = !!(cfg.topics.batteryLevel || cfg.topics.lowBattery);
+      if (hasBattery && (dev as any).batteryLevel === undefined) {
+        (dev as any).batteryLevel = 100;
       }
     }
 
@@ -416,7 +426,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     return Array.from(subs);
   }
 
-  private async connectMqtt(reconnect = false) {
+  private async connectMqtt(_reconnect = false) {
     const subs = this.collectAllSubscriptions();
 
     if (!subs.length && !this.storage.getItem('topicSetTarget')) {
