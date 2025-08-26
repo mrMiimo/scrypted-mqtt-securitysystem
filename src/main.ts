@@ -38,7 +38,7 @@ const DEFAULT_OUTGOING: Record<SecuritySystemMode, string> = {
 };
 
 /** Common incoming synonyms → SecuritySystemMode
- *  (FIX: gli stati transitori non alterano la modalità) */
+ *  (transitori non alterano la modalità corrente) */
 function payloadToMode(payload: string | Buffer | undefined): SecuritySystemMode | undefined {
   if (payload == null) return;
   const p = normalize(payload.toString());
@@ -56,7 +56,7 @@ function payloadToMode(payload: string | Buffer | undefined): SecuritySystemMode
   if (['arm_night', 'night', 'armed_night', 'sleep', 'arm_sleep', 'armed_sleep'].includes(p))
     return SecuritySystemMode.NightArmed;
 
-  // transitional / ignore for mode changes
+  // transitori: non cambiano il mode
   if (['entry_delay', 'exit_delay', 'pending', 'arming', 'disarming'].includes(p))
     return undefined;
 
@@ -67,6 +67,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
   implements SecuritySystem, Settings, TamperSensor, Online {
 
   private client?: MqttClient;
+  private pendingTarget?: SecuritySystemMode;
 
   constructor() {
     super();
@@ -94,9 +95,11 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     this.connectMqtt().catch(e => this.console.error('MQTT connect error:', e));
 
     // chiusura pulita del client MQTT ai reload/stop del plugin
-    process.once('SIGTERM', () => { try { this.client?.end(true); } catch {} });
-    process.once('SIGINT',  () => { try { this.client?.end(true); } catch {} });
-    process.on('exit',      () => { try { this.client?.end(true); } catch {} });
+    try {
+      process.once('SIGTERM', () => { try { this.client?.end(true); } catch {} });
+      process.once('SIGINT',  () => { try { this.client?.end(true); } catch {} });
+      process.on('exit',      () => { try { this.client?.end(true); } catch {} });
+    } catch {}
   }
 
   // --- Settings UI ---
@@ -158,12 +161,12 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
   }
 
   private async connectMqtt(reconnect = false) {
-    const subs = [
-      this.storage.getItem('topicGetTarget'),
-      this.storage.getItem('topicGetCurrent'),
-      this.storage.getItem('topicTamper'),
-      this.storage.getItem('topicOnline'),
-    ].filter(Boolean) as string[];
+    const tTarget = this.storage.getItem('topicGetTarget') || '';
+    const tCurrent = this.storage.getItem('topicGetCurrent') || '';
+    const tTamper  = this.storage.getItem('topicTamper') || '';
+    const tOnline  = this.storage.getItem('topicOnline') || '';
+
+    const subs = [tTarget, tCurrent, tTamper, tOnline].filter(Boolean);
 
     if (!subs.length && !this.storage.getItem('topicSetTarget')) {
       this.console.warn('Configura almeno un topic nelle impostazioni.');
@@ -196,15 +199,16 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     client.on('message', (topic: string, payload: Buffer) => {
       try {
         const p = payload?.toString() ?? '';
+
         // Online
-        if (topic === this.storage.getItem('topicOnline')) {
+        if (topic === tOnline) {
           if (truthy(p) || p.toLowerCase() === 'online') this.online = true;
           if (falsy(p) || p.toLowerCase() === 'offline') this.online = false;
           return;
         }
 
         // Tamper
-        if (topic === this.storage.getItem('topicTamper')) {
+        if (topic === tTamper) {
           const np = normalize(p);
           if (truthy(np) || ['tamper', 'intrusion', 'cover', 'motion', 'magnetic'].includes(np)) {
             (this as any).tampered = (['cover','intrusion','motion','magnetic'].find(x => x === np) as any) || true;
@@ -214,8 +218,8 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
           return;
         }
 
-        // Target/Current → mode/triggered
-        if ([this.storage.getItem('topicGetTarget'), this.storage.getItem('topicGetCurrent')].includes(topic)) {
+        // CURRENT state → aggiorna il mode mostrato
+        if (topic === tCurrent) {
           const mode = payloadToMode(payload);
           const isAlarm = ['alarm', 'triggered'].includes(normalize(p));
           const current = this.securitySystemState || { mode: SecuritySystemMode.Disarmed };
@@ -232,6 +236,13 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
           };
 
           this.securitySystemState = newState;
+          return;
+        }
+
+        // TARGET state → NON cambia il mode; lo memorizziamo solo come pending
+        if (topic === tTarget) {
+          this.pendingTarget = payloadToMode(payload);
+          this.console.log('Target state reported:', p, '->', this.pendingTarget);
           return;
         }
       } catch (e) {
@@ -265,20 +276,19 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
   async armSecuritySystem(mode: SecuritySystemMode): Promise<void> {
     const payload = this.getOutgoing(mode);
     this.console.log('armSecuritySystem', mode, '->', payload);
+    this.pendingTarget = mode;     // memorizza target, ma NON cambiare il current
     this.publishSetTarget(payload);
 
-    // Optimistic UI update until broker echoes target/current state
-    const st = this.securitySystemState || { mode: SecuritySystemMode.Disarmed };
-    this.securitySystemState = { ...st, mode, triggered: false };
+    // niente update ottimistico: HomeKit vedrà Target ≠ Current e mostrerà "Arming..."
   }
 
   async disarmSecuritySystem(): Promise<void> {
     const payload = this.getOutgoing(SecuritySystemMode.Disarmed);
     this.console.log('disarmSecuritySystem ->', payload);
+    this.pendingTarget = SecuritySystemMode.Disarmed;
     this.publishSetTarget(payload);
 
-    const st = this.securitySystemState || { mode: SecuritySystemMode.Disarmed };
-    this.securitySystemState = { ...st, mode: SecuritySystemMode.Disarmed, triggered: false };
+    // niente update ottimistico: aspetta il feedback CURRENT
   }
 
   private getOutgoing(mode: SecuritySystemMode) {
