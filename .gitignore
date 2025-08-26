@@ -1,12 +1,5 @@
-node_modules/
-dist/
-out/
-*.tgz
-.npmrc
-.env
 .DS_Store
-node_modules/
-dist/
-out/
 *.tgz
-.DS_Store
+dist/
+node_modules/
+out/
