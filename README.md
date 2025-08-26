@@ -1,107 +1,110 @@
 # Paradox MQTT SecuritySystem (Scrypted)
 
-Expose and control a **Paradox** alarm via **MQTT (PAI/PAI-MQTT style)** as a Scrypted **SecuritySystem**.
+Control and sync a Paradox (PAI/PAI-MQTT–like) alarm via MQTT, exposed in Scrypted as a **SecuritySystem**. Optional child sensors (contact, motion, occupancy) can also be surfaced.
 
 ---
 
 ## Features
-- Bidirectional sync: target & current state
-- Custom MQTT topics (publish/subscribe)
-- Tamper & online status support
-- QoS / Retain options for outgoing messages
-- Fully customizable outgoing payloads
+- Arm/Disarm: Disarmed, Home, Away, Night.
+- MQTT topics for current/target state, tamper, and online.
+- Optional per‑sensor MQTT bindings (contact/motion/occupancy) with battery, tamper, and online status.
+- HomeKit: usable through the official Scrypted HomeKit plugin (non-standalone accessory).
 
 ---
 
-## Requirements
-- **Scrypted** (server up and running)
-- An MQTT broker (e.g., Mosquitto)
-- A Paradox ↔︎ MQTT bridge (e.g., **PAI**)
-
----
-
-## Installation
-
+## Install
 ```bash
 npm i
-npm run build        # → generates dist/plugin.zip
+npm run build       # produces dist/plugin.zip
 ```
+Then in **Scrypted → Manage Plugins → Install from file** and upload `dist/plugin.zip`.
 
-- In Scrypted: **Manage Plugins → Install from file** and upload `dist/plugin.zip`  
-  _Or_:
-```bash
-npm run deploy       # requires: npx scrypted-cli login  (one time)
-```
+> Alternatively: `npm run deploy` (requires `npx scrypted-cli login` one time).
 
 ---
 
-## Configuration (Scrypted → your device → Settings)
-
+## Configuration (Settings)
 ### MQTT
-- **Broker URL**: e.g. `mqtt://0.0.0.0:1883`
-- **Username / Password** (if required)
-- **Client ID**, **TLS**, **Reject Unauthorized**
+- **Broker URL** e.g. `mqtt://127.0.0.1:1883`
+- **Username/Password** (if needed)
+- **Client ID**
+- **TLS / Reject Unauthorized** (when using `mqtts://`)
 
-### Topics
-| Purpose                          | Direction | Example Topic                                             |
-|----------------------------------|-----------|-----------------------------------------------------------|
-| Set Target State                 | publish   | `SYSTEM/control/partitions/Area_1`                        |
-| Get Target State                 | subscribe | `SYSTEM/states/partitions/Area_1/target_state`            |
-| Get Current State                | subscribe | `SYSTEM/states/partitions/Area_1/current_state`           |
-| Get Status Tampered              | subscribe | `SYSTEM/states/system/troubles/zone_tamper_trouble`       |
-| Get Online                       | subscribe | `SYSTEM/interface/availability`                           |
+### Alarm Topics
+- **Set Target State (publish)**: where the plugin publishes outgoing arm/disarm payloads.
+- **Get Target State (subscribe)**: topic that echoes the intended target from your alarm bridge.
+- **Get Current State (subscribe)**: topic reflecting the *actual* alarm state.
+- **Get Status Tampered (subscribe)**: tamper status.
+- **Get Online (subscribe)**: online/offline indicator of the alarm bridge.
 
 ### Publish Options
-- **QoS** (0/1/2)  
-- **Retain** (true/false)
+- **QoS** / **Retain**
 
-### Outgoing Payloads (customizable)
-- **Disarm**: `disarm`
-- **Home**: `arm_home`
-- **Away**: `arm_away`
-- **Night**: `arm_night`
+### Outgoing Payloads (defaults)
+- Disarm → `disarm`
+- Home → `arm_home`
+- Away → `arm_away`
+- Night → `arm_night`
 
----
-
-## Payload Notes
-
-**Incoming (subscribe):** the plugin also recognizes common synonyms, e.g.
-- `disarmed`, `off`, `idle`, `ready` → **Disarmed**
-- `armed_home`, `home`, `stay` → **Home**
-- `armed_away`, `away`, `arming`, `exit_delay` → **Away**
-- `armed_night`, `night` → **Night**
-- `alarm`, `triggered` → sets `triggered: true`
-- Transitional states (e.g., `entry_delay`, `pending`) are ignored for mode changes.
-
-**Outgoing (publish):** change payload strings in Settings to match your PAI mapping.
+You can change these to match your bridge.
 
 ---
 
-## Recommended PAI Mapping (example)
+## Sensor Support (Optional)
+The plugin can expose additional sensors. You may add them from the **Sensors** section in Settings.
 
-**Publish (Set):**
-```
-SYSTEM/control/partitions/Area_1
-  Disarm -> disarm
-  Home   -> arm_home
-  Away   -> arm_away
-  Night  -> arm_night
-```
+Each sensor has:
+- **kind**: `contact` | `motion` | `occupancy`
+- **topics** (examples):
+  - Contact: `your/zones/front-door/open`
+  - Motion: `your/zones/hallway/motion`
+  - Occupancy: `your/rooms/office/occupied`
+  - Optional: `batteryLevel` (0..100), `lowBattery` (boolean), `tamper`, `online`
 
-**Subscribe (Get):**
-```
-Target  -> SYSTEM/states/partitions/Area_1/target_state
-Current -> SYSTEM/states/partitions/Area_1/current_state
-Tamper  -> SYSTEM/states/system/troubles/zone_tamper_trouble   (true/false)
-Online  -> SYSTEM/interface/availability                       (online/offline)
-```
+### Creating Sensors from the UI
+- Fill the fields for **ID**, **Name**, **Kind**, and desired **Topics**.
+- Toggle **Create Sensor** to “On” and **Save**.
+- **Restart this plugin** to have Scrypted show the new accessory under the plugin device.
+- If you’re using HomeKit, **restart the HomeKit plugin** to see newly added accessories.
+
+> Only the capabilities for which topics are provided will be exposed (e.g., no low‑battery if no related topic is set).
+
+---
+
+## HomeKit Notes
+Add this plugin’s device to the HomeKit plugin **(not as a Standalone accessory)**. A QR code appears in the HomeKit plugin when it is running and configured.
 
 ---
 
-## Tips
-
-- If you use Scrypted’s **HomeKit** plugin to expose this device:
-  - Enable the **Security System** extension/mapping inside the HomeKit plugin.
-  - Ensure your Scrypted container runs with **host networking** so mDNS/Bonjour works (for pairing).
+## Example Topic Mapping (Generic)
+> Replace with your own topics from your bridge.
+- **Set Target** (publish): `alarm/control/partition_1`
+- **Get Target** (subscribe): `alarm/states/partition_1/target_state`
+- **Get Current** (subscribe): `alarm/states/partition_1/current_state`
+- **Tamper** (subscribe): `alarm/states/system/tamper`
+- **Online** (subscribe): `alarm/interface/availability` (`online`/`offline`)
 
 ---
+
+## Behavior & States
+- The plugin waits for **Current State** before flipping the alarm mode (so you can see arming delays).
+- It accepts common synonyms on incoming states (e.g., `armed_home`, `armed_away`, `armed_night`, `disarmed`).
+- For sensors, battery/low‑battery is only reported when the corresponding topic is configured and indicates it.
+
+---
+
+## Troubleshooting
+- No HomeKit QR? Ensure the HomeKit plugin is running and this device is added there (not standalone).
+- Mode flips instantly? Ensure your bridge publishes **Current State** updates (and optionally `exit_delay` during arming).
+- Nothing happens on arm/disarm? Verify the **Set Target** topic and outgoing payloads.
+- MQTT connection issues? Check broker URL, credentials, TLS, and network reachability.
+
+---
+
+## Privacy
+You can set a noreply email in git to avoid exposing your name in commit metadata. For npm, ensure your account privacy settings are configured appropriately.
+
+---
+
+## License
+MIT (or your preferred license).
