@@ -37,18 +37,28 @@ const DEFAULT_OUTGOING: Record<SecuritySystemMode, string> = {
   [SecuritySystemMode.NightArmed]: 'arm_night',
 };
 
-/** Common incoming synonyms → SecuritySystemMode */
+/** Common incoming synonyms → SecuritySystemMode
+ *  (FIX: gli stati transitori non alterano la modalità) */
 function payloadToMode(payload: string | Buffer | undefined): SecuritySystemMode | undefined {
   if (payload == null) return;
   const p = normalize(payload.toString());
 
-  if (['disarm', 'disarmed', 'off', '0', 'idle', 'ready'].includes(p)) return SecuritySystemMode.Disarmed;
-  if (['arm_home', 'home', 'stay', 'armed_home'].includes(p)) return SecuritySystemMode.HomeArmed;
-  if (['arm_away', 'away', 'armed_away', 'arming', 'exit_delay'].includes(p)) return SecuritySystemMode.AwayArmed;
-  if (['arm_night', 'night', 'armed_night'].includes(p)) return SecuritySystemMode.NightArmed;
+  // final modes
+  if (['disarm', 'disarmed', 'off', '0', 'idle', 'ready'].includes(p))
+    return SecuritySystemMode.Disarmed;
 
-  // Sometimes current_state may be 'alarm', 'entry_delay', etc.
-  if (['entry_delay', 'pending', 'arming'].includes(p)) return undefined;
+  if (['arm_home', 'home', 'stay', 'armed_home'].includes(p))
+    return SecuritySystemMode.HomeArmed;
+
+  if (['arm_away', 'away', 'armed_away', 'away_armed'].includes(p))
+    return SecuritySystemMode.AwayArmed;
+
+  if (['arm_night', 'night', 'armed_night', 'sleep', 'arm_sleep', 'armed_sleep'].includes(p))
+    return SecuritySystemMode.NightArmed;
+
+  // transitional / ignore for mode changes
+  if (['entry_delay', 'exit_delay', 'pending', 'arming', 'disarming'].includes(p))
+    return undefined;
 
   return undefined;
 }
@@ -83,7 +93,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     // Connect on start
     this.connectMqtt().catch(e => this.console.error('MQTT connect error:', e));
 
-    // 🔻 chiusura pulita del client MQTT ai reload/stop del plugin
+    // chiusura pulita del client MQTT ai reload/stop del plugin
     process.once('SIGTERM', () => { try { this.client?.end(true); } catch {} });
     process.once('SIGINT',  () => { try { this.client?.end(true); } catch {} });
     process.on('exit',      () => { try { this.client?.end(true); } catch {} });
