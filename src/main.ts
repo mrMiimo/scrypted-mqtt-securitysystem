@@ -127,22 +127,93 @@ abstract class BaseMqttSensor extends ScryptedDeviceBase implements Online, Tamp
   protected abstract handlePrimary(topic: string, np: string, raw: string): void;
 }
 
+/** === SENSORI CON PARSING ROBUSTO PER HOMEKIT === */
 class ContactMqttSensor extends BaseMqttSensor implements EntrySensor {
   entryOpen?: boolean;
-  protected handlePrimary(topic: string, np: string) {
-    if (topic === this.cfg.topics.contact) this.entryOpen = truthy(np);
+
+  protected handlePrimary(topic: string, np: string, raw: string) {
+    if (topic !== this.cfg.topics.contact) return;
+
+    // stringhe comuni
+    if (['open', 'opened', '1', 'true', 'on', 'yes'].includes(np)) {
+      this.entryOpen = true; return;
+    }
+    if (['closed', 'close', '0', 'false', 'off', 'no', 'shut'].includes(np)) {
+      this.entryOpen = false; return;
+    }
+
+    // JSON comuni
+    try {
+      const j = JSON.parse(raw);
+      if (typeof j?.open === 'boolean')         { this.entryOpen = !!j.open; return; }
+      if (typeof j?.opened === 'boolean')       { this.entryOpen = !!j.opened; return; }
+      if (typeof j?.contact === 'boolean')      { this.entryOpen = !j.contact; return; } // contact:false => OPEN
+      if (typeof j?.state === 'string') {
+        const s = String(j.state).toLowerCase();
+        if (s === 'open')   { this.entryOpen = true;  return; }
+        if (s === 'closed') { this.entryOpen = false; return; }
+      }
+    } catch {}
+
+    this.console?.debug?.(`Contact payload non gestito (${this.cfg.id}): "${raw}"`);
   }
 }
+
 class MotionMqttSensor extends BaseMqttSensor implements MotionSensor {
   motionDetected?: boolean;
-  protected handlePrimary(topic: string, np: string) {
-    if (topic === this.cfg.topics.motion) this.motionDetected = truthy(np);
+
+  protected handlePrimary(topic: string, np: string, raw: string) {
+    if (topic !== this.cfg.topics.motion) return;
+
+    if (['motion', 'detected', 'active', '1', 'true', 'on', 'yes'].includes(np)) {
+      this.motionDetected = true; return;
+    }
+    if (['clear', 'inactive', 'no_motion', 'none', '0', 'false', 'off', 'no'].includes(np)) {
+      this.motionDetected = false; return;
+    }
+
+    try {
+      const j = JSON.parse(raw);
+      if (typeof j?.motion === 'boolean')       { this.motionDetected = !!j.motion; return; }
+      if (typeof j?.occupancy === 'boolean')    { this.motionDetected = !!j.occupancy; return; }
+      if (typeof j?.presence === 'boolean')     { this.motionDetected = !!j.presence; return; }
+      if (typeof j?.state === 'string') {
+        const s = String(j.state).toLowerCase();
+        if (['on','motion','detected','active'].includes(s)) { this.motionDetected = true;  return; }
+        if (['off','clear','inactive'].includes(s))          { this.motionDetected = false; return; }
+      }
+    } catch {}
+
+    this.console?.debug?.(`Motion payload non gestito (${this.cfg.id}): "${raw}"`);
   }
 }
+
 class OccupancyMqttSensor extends BaseMqttSensor implements OccupancySensor {
   occupied?: boolean;
-  protected handlePrimary(topic: string, np: string) {
-    if (topic === this.cfg.topics.occupancy) this.occupied = truthy(np);
+
+  protected handlePrimary(topic: string, np: string, raw: string) {
+    if (topic !== this.cfg.topics.occupancy) return;
+
+    if (['occupied', 'presence', 'present', '1', 'true', 'on', 'yes'].includes(np)) {
+      this.occupied = true; return;
+    }
+    if (['unoccupied', 'vacant', 'absent', '0', 'false', 'off', 'no', 'clear'].includes(np)) {
+      this.occupied = false; return;
+    }
+
+    try {
+      const j = JSON.parse(raw);
+      if (typeof j?.occupied === 'boolean')     { this.occupied = !!j.occupied; return; }
+      if (typeof j?.presence === 'boolean')     { this.occupied = !!j.presence; return; }
+      if (typeof j?.occupancy === 'boolean')    { this.occupied = !!j.occupancy; return; }
+      if (typeof j?.state === 'string') {
+        const s = String(j.state).toLowerCase();
+        if (['occupied','presence','present','on'].includes(s)) { this.occupied = true;  return; }
+        if (['vacant','absent','clear','off'].includes(s))      { this.occupied = false; return; }
+      }
+    } catch {}
+
+    this.console?.debug?.(`Occupancy payload non gestito (${this.cfg.id}): "${raw}"`);
   }
 }
 
@@ -160,8 +231,8 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
   tampered?: any;
   securitySystemState?: any;
 
-  // evitiamo spam: ricordiamo se abbiamo già provato ad annunciare
-  private triedDiscoveryOnce = false;
+  // Evita loop di log: tenta una volta finché deviceManager non c’è, poi riprova su eventi utili.
+  private discoveryPostponed = false;
 
   constructor() {
     super();
@@ -347,17 +418,16 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
   private safeDiscoverSensors(triggeredByChange = false) {
     const dmAny: any = (sdk as any)?.deviceManager;
     if (!dmAny) {
-      if (!this.triedDiscoveryOnce) {
+      // Posticipa una sola volta; poi riproviamo su connect MQTT e al primo messaggio
+      if (!this.discoveryPostponed) {
         this.console.log('Device discovery postponed: deviceManager not ready yet.');
-        this.triedDiscoveryOnce = true;
+        this.discoveryPostponed = true;
       }
-      // Riprovaremo in due casi: a) settaggi cambiati (già chiama safeDiscoverSensors)
-      // b) al primo messaggio MQTT (vedi handler sotto).
       return;
     }
-    // Se arriviamo qui, il manager c’è: esegui discover.
-    this.triedDiscoveryOnce = false;
+    this.discoveryPostponed = false;
     this.discoverSensors(dmAny);
+    if (triggeredByChange) this.console.log('Sensors discovered/updated.');
   }
 
   /** discoverSensors con deviceManager garantito */
@@ -511,8 +581,8 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
         }
 
         // Dispatch ai sensori
-        // (E prova ad annunciare se non l’abbiamo ancora fatto e ora il manager è pronto)
-        if (this.triedDiscoveryOnce) this.safeDiscoverSensors(true);
+        // (E prova ad annunciare se era stato posticipato e ora il manager è pronto)
+        if (this.discoveryPostponed) this.safeDiscoverSensors(true);
 
         for (const dev of this.devices.values())
           dev.handleMqtt(topic, payload);
