@@ -1,32 +1,42 @@
-// --- Preload: silenzia SOLO il warning facoltativo di sdk.json ---
-(() => {
-  const swallow = (orig: (...args: any[]) => any) => (...args: any[]) => {
-    const txt = args.map(a => typeof a === 'string' ? a : (a?.message || '')).join(' ');
-    if (txt.includes('failed to load custom interface descriptors')) return;
-    return orig(...args);
-  };
-  console.error = swallow(console.error.bind(console));
-  console.warn  = swallow(console.warn.bind(console));
-})();
+// --- Silence ONLY the optional sdk.json warning from @scrypted/sdk ---
+const __origConsoleError = console.error.bind(console);
+console.error = (...args: any[]) => {
+  const first = args?.[0];
+  const msg = typeof first === 'string' ? first : (first?.message || '');
+  if (typeof msg === 'string' && msg.includes('failed to load custom interface descriptors')) {
+    // swallow just this warning
+    return;
+  }
+  __origConsoleError(...args);
+};
 
-// Carica lo SDK in runtime (evita ESM per garantire l’ordine col preload)
+// Carica lo SDK (non tipizziamo qui per non perdere le proprietà runtime)
 const sdk = require('@scrypted/sdk');
 
-// Valori runtime (enum, classi, manager)
+// Valori runtime (enum/classi/manager) dal modulo SDK
 const {
   ScryptedDeviceBase,
   ScryptedDeviceType,
-  ScryptedInterface,     // enum: valori
-  SecuritySystemMode,    // enum: valori
+  ScryptedInterface,    // valore (enum)
+  SecuritySystemMode,   // valore (enum)
   systemManager,
+  // ⚠️ NON destrutturare deviceManager: va letto sempre "al volo" da sdk.deviceManager.
 } = sdk;
 
-// Tipi (solo TS)
+// Importa SOLO i TIPI (per non rompere i valori runtime)
 import type {
-  Settings, Setting, SecuritySystem, TamperSensor, Online, DeviceProvider,
-  EntrySensor, MotionSensor, OccupancySensor, Battery,
-  ScryptedInterface as TScryptedInterface,
-  SecuritySystemMode as TSecuritySystemMode,
+  Settings,
+  Setting,
+  SecuritySystem,
+  TamperSensor,
+  Online,
+  DeviceProvider,
+  EntrySensor,
+  MotionSensor,
+  OccupancySensor,
+  Battery,
+  ScryptedInterface as TScryptedInterface,           // alias tipo
+  SecuritySystemMode as TSecuritySystemMode,         // alias tipo
 } from '@scrypted/sdk';
 
 import mqtt, { MqttClient, IClientOptions } from 'mqtt';
@@ -42,10 +52,15 @@ function falsy(v?: string) {
   const s = v.toString().trim().toLowerCase();
   return s === '0' || s === 'false' || s === 'offline' || s === 'no' || s === 'off';
 }
-function normalize(s: string) { return (s || '').trim().toLowerCase(); }
-function clamp(n: number, min: number, max: number) { return Math.max(min, Math.min(max, n)); }
+function normalize(s: string) {
+  return (s || '').trim().toLowerCase();
+}
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
 
-/** Outgoing predefiniti (PAI-like). Chiavi numeriche per compatibilità enum */
+/** SecuritySystem outgoing defaults (PAI-like)
+ *  Nota: usare number come chiave evita stranezze con gli enum in TS. */
 const DEFAULT_OUTGOING: Record<number, string> = {
   [SecuritySystemMode.Disarmed]: 'disarm',
   [SecuritySystemMode.HomeArmed]: 'arm_home',
@@ -53,15 +68,27 @@ const DEFAULT_OUTGOING: Record<number, string> = {
   [SecuritySystemMode.NightArmed]: 'arm_night',
 };
 
-/** Parse incoming payload -> final mode (ignora transitori) */
+/** Parse incoming payload -> final mode (ignore transition states) */
 function payloadToMode(payload: string | Buffer | undefined): TSecuritySystemMode | undefined {
   if (payload == null) return;
   const p = normalize(payload.toString());
-  if (['disarm', 'disarmed', 'off', '0', 'idle', 'ready'].includes(p)) return SecuritySystemMode.Disarmed;
-  if (['arm_home', 'home', 'stay', 'armed_home'].includes(p)) return SecuritySystemMode.HomeArmed;
-  if (['arm_away', 'away', 'armed_away', 'away_armed'].includes(p)) return SecuritySystemMode.AwayArmed;
-  if (['arm_night', 'night', 'armed_night', 'sleep', 'arm_sleep', 'armed_sleep'].includes(p)) return SecuritySystemMode.NightArmed;
-  if (['entry_delay', 'exit_delay', 'pending', 'arming', 'disarming'].includes(p)) return undefined;
+
+  if (['disarm', 'disarmed', 'off', '0', 'idle', 'ready'].includes(p))
+    return SecuritySystemMode.Disarmed;
+
+  if (['arm_home', 'home', 'stay', 'armed_home'].includes(p))
+    return SecuritySystemMode.HomeArmed;
+
+  if (['arm_away', 'away', 'armed_away', 'away_armed'].includes(p))
+    return SecuritySystemMode.AwayArmed;
+
+  if (['arm_night', 'night', 'armed_night', 'sleep', 'arm_sleep', 'armed_sleep'].includes(p))
+    return SecuritySystemMode.NightArmed;
+
+  // transitori: non cambiano il mode
+  if (['entry_delay', 'exit_delay', 'pending', 'arming', 'disarming'].includes(p))
+    return undefined;
+
   return undefined;
 }
 
@@ -69,13 +96,16 @@ function payloadToMode(payload: string | Buffer | undefined): TSecuritySystemMod
 type SensorKind = 'contact' | 'motion' | 'occupancy';
 
 type SensorTopics = {
-  contact?: string;
-  motion?: string;
-  occupancy?: string;
-  batteryLevel?: string;
-  lowBattery?: string;
-  tamper?: string;
-  online?: string;
+  // primary state:
+  contact?: string;      // -> EntrySensor.entryOpen
+  motion?: string;       // -> MotionSensor.motionDetected
+  occupancy?: string;    // -> OccupancySensor.occupied
+
+  // extras:
+  batteryLevel?: string; // number 0..100
+  lowBattery?: string;   // boolean; usato se manca batteryLevel
+  tamper?: string;       // boolean / string
+  online?: string;       // "online"/"offline" or bool
 };
 
 type SensorConfig = {
@@ -87,6 +117,8 @@ type SensorConfig = {
 
 abstract class BaseMqttSensor extends ScryptedDeviceBase implements Online, TamperSensor, Battery {
   protected cfg: SensorConfig;
+
+  // proprietà richieste dalle interfacce
   online?: boolean;
   tampered?: any;
   batteryLevel?: number;
@@ -96,30 +128,36 @@ abstract class BaseMqttSensor extends ScryptedDeviceBase implements Online, Tamp
     this.cfg = cfg;
   }
 
+  /** Called by parent on each MQTT message */
   handleMqtt(topic: string, payload: Buffer) {
     const p = payload?.toString() ?? '';
     const np = normalize(p);
 
+    // online
     if (topic === this.cfg.topics.online) {
       if (truthy(np) || np === 'online') this.online = true;
-      if (falsy(np)  || np === 'offline') this.online = false;
+      if (falsy(np) || np === 'offline') this.online = false;
     }
 
+    // tamper
     if (topic === this.cfg.topics.tamper) {
-      if (truthy(np) || ['tamper','intrusion','cover','motion','magnetic'].includes(np)) {
+      if (truthy(np) || ['tamper', 'intrusion', 'cover', 'motion', 'magnetic'].includes(np)) {
         this.tampered = (['cover','intrusion','motion','magnetic'].find(x => x === np) as any) || true;
+      } else if (falsy(np)) {
+        this.tampered = false;
       }
-      else if (falsy(np)) this.tampered = false;
     }
 
+    // battery
     if (topic === this.cfg.topics.batteryLevel) {
       const n = clamp(parseFloat(p), 0, 100);
       if (isFinite(n)) this.batteryLevel = n;
-    }
-    else if (topic === this.cfg.topics.lowBattery && !this.cfg.topics.batteryLevel) {
+    } else if (topic === this.cfg.topics.lowBattery && !this.cfg.topics.batteryLevel) {
+      // se abbiamo SOLO lowBattery (bool):
       this.batteryLevel = truthy(np) ? 10 : 100;
     }
 
+    // primary handled by subclasses
     this.handlePrimary(topic, np, p);
   }
 
@@ -129,19 +167,27 @@ abstract class BaseMqttSensor extends ScryptedDeviceBase implements Online, Tamp
 class ContactMqttSensor extends BaseMqttSensor implements EntrySensor {
   entryOpen?: boolean;
   protected handlePrimary(topic: string, np: string) {
-    if (topic === this.cfg.topics.contact) this.entryOpen = truthy(np);
+    if (topic === this.cfg.topics.contact) {
+      this.entryOpen = truthy(np);
+    }
   }
 }
+
 class MotionMqttSensor extends BaseMqttSensor implements MotionSensor {
   motionDetected?: boolean;
   protected handlePrimary(topic: string, np: string) {
-    if (topic === this.cfg.topics.motion) this.motionDetected = truthy(np);
+    if (topic === this.cfg.topics.motion) {
+      this.motionDetected = truthy(np);
+    }
   }
 }
+
 class OccupancyMqttSensor extends BaseMqttSensor implements OccupancySensor {
   occupied?: boolean;
   protected handlePrimary(topic: string, np: string) {
-    if (topic === this.cfg.topics.occupancy) this.occupied = truthy(np);
+    if (topic === this.cfg.topics.occupancy) {
+      this.occupied = truthy(np);
+    }
   }
 }
 
@@ -151,25 +197,30 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
   implements SecuritySystem, Settings, TamperSensor, Online, DeviceProvider {
 
   private client?: MqttClient;
+
+  // sensor management
   private sensorsCfg: SensorConfig[] = [];
   private devices = new Map<string, BaseMqttSensor>();
+
+  // remember target while waiting current
   private pendingTarget?: TSecuritySystemMode;
 
+  // proprietà richieste dalle interfacce
   online?: boolean;
   tampered?: any;
   securitySystemState?: any;
 
-  private triedDiscoveryOnce = false;
-
   constructor() {
     super();
 
-    // Tipo in UI (best-effort)
+    // (facoltativo) Imposta il device type in UI
     setTimeout(() => {
-      try { (systemManager.getDeviceById(this.id) as any)?.setType?.(ScryptedDeviceType.SecuritySystem); } catch {}
+      try {
+        (systemManager.getDeviceById(this.id) as any)?.setType?.(ScryptedDeviceType.SecuritySystem);
+      } catch {}
     });
 
-    // Stato di default
+    // Default state
     this.securitySystemState = this.securitySystemState || {
       mode: SecuritySystemMode.Disarmed,
       supportedModes: [
@@ -181,14 +232,14 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     };
     this.online = this.online ?? false;
 
-    // Config sensori e announce
+    // Load sensors config and announce devices
     this.loadSensorsFromStorage();
-    this.safeDiscoverSensors(); // non spamma se deviceManager non c'è
+    this.discoverSensors().catch((e: any) => this.console.error('discoverSensors error', e));
 
-    // Connect MQTT
+    // Connect on start
     this.connectMqtt().catch((e: any) => this.console.error('MQTT connect error:', e));
 
-    // Shutdown pulito
+    // chiusura pulita del client MQTT ai reload/stop del plugin
     try {
       process.once('SIGTERM', () => { try { this.client?.end(true); } catch {} });
       process.once('SIGINT',  () => { try { this.client?.end(true); } catch {} });
@@ -196,15 +247,20 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     } catch {}
   }
 
-  /** ---- Settings ---- */
-
+  // helpers persistenza
   private saveSensorsToStorage() {
-    try { this.storage.setItem('sensorsJson', JSON.stringify(this.sensorsCfg)); }
-    catch (e) { this.console.error('saveSensorsToStorage error', e); }
+    try {
+      this.storage.setItem('sensorsJson', JSON.stringify(this.sensorsCfg));
+    } catch (e) {
+      this.console.error('saveSensorsToStorage error', e);
+    }
   }
+
+  /** ---- Settings UI ---- */
 
   async getSettings(): Promise<Setting[]> {
     const out: Setting[] = [
+      // MQTT Core
       { group: 'MQTT', key: 'brokerUrl', title: 'Broker URL', placeholder: 'mqtt://127.0.0.1:1883', value: this.storage.getItem('brokerUrl') || 'mqtt://127.0.0.1:1883' },
       { group: 'MQTT', key: 'username', title: 'Username', type: 'string', value: this.storage.getItem('username') || '' },
       { group: 'MQTT', key: 'password', title: 'Password', type: 'password', value: this.storage.getItem('password') || '' },
@@ -212,50 +268,49 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
       { group: 'MQTT', key: 'tls', title: 'Use TLS', type: 'boolean', value: this.storage.getItem('tls') === 'true' },
       { group: 'MQTT', key: 'rejectUnauthorized', title: 'Reject Unauthorized (TLS)', type: 'boolean', value: this.storage.getItem('rejectUnauthorized') !== 'false', description: 'Disattiva solo con broker self-signed.' },
 
+      // Alarm Topics
       { group: 'Alarm Topics', key: 'topicSetTarget', title: 'Set Target State (publish)', placeholder: 'paradox/control/partitions/Area_1', value: this.storage.getItem('topicSetTarget') || '' },
       { group: 'Alarm Topics', key: 'topicGetTarget', title: 'Get Target State (subscribe)', placeholder: 'paradox/states/partitions/Area_1/target_state', value: this.storage.getItem('topicGetTarget') || '' },
       { group: 'Alarm Topics', key: 'topicGetCurrent', title: 'Get Current State (subscribe)', placeholder: 'paradox/states/partitions/Area_1/current_state', value: this.storage.getItem('topicGetCurrent') || '' },
-      { group: 'Alarm Topics', key: 'topicTamper',  title: 'Get Status Tampered (subscribe)', placeholder: 'paradox/states/system/troubles/zone_tamper_trouble', value: this.storage.getItem('topicTamper') || '' },
-      { group: 'Alarm Topics', key: 'topicOnline',  title: 'Get Online (subscribe)', placeholder: 'paradox/interface/availability', value: this.storage.getItem('topicOnline') || '' },
+      { group: 'Alarm Topics', key: 'topicTamper', title: 'Get Status Tampered (subscribe)', placeholder: 'paradox/states/system/troubles/zone_tamper_trouble', value: this.storage.getItem('topicTamper') || '' },
+      { group: 'Alarm Topics', key: 'topicOnline', title: 'Get Online (subscribe)', placeholder: 'paradox/interface/availability', value: this.storage.getItem('topicOnline') || '' },
 
       { group: 'Publish Options', key: 'qos', title: 'QoS', type: 'integer', value: parseInt(this.storage.getItem('qos') || '0') },
       { group: 'Publish Options', key: 'retain', title: 'Retain', type: 'boolean', value: this.storage.getItem('retain') === 'true' },
-
-      // ---- Danger Zone ----
-      { group: 'Danger Zone', key: 'danger.resetSensors', title: 'Reset all sensors (wipe)', type: 'boolean', description: 'Cancella tutti i sensori salvati e rimuove i device annunciati.' },
-      { group: 'Danger Zone', key: 'danger.export', title: 'Export sensors JSON (read-only)', value: JSON.stringify(this.sensorsCfg, null, 2), readonly: true },
-      { group: 'Danger Zone', key: 'danger.import', title: 'Import sensors JSON (paste & Save)', type: 'string', placeholder: '[]', description: 'Incolla JSON valido per sovrascrivere l’elenco sensori.' },
     ];
 
-    // ---- Add Sensor
+    // ---- UI Add Sensor ----
     out.push(
-      { group: 'Add Sensor', key: 'new.id',   title: 'New Sensor ID', placeholder: 'porta-sogg', value: this.storage.getItem('new.id') || '' },
-      { group: 'Add Sensor', key: 'new.name', title: 'Name',          placeholder: 'Porta Soggiorno', value: this.storage.getItem('new.name') || '' },
-      { group: 'Add Sensor', key: 'new.kind', title: 'Type',          value: this.storage.getItem('new.kind') || 'contact', choices: ['contact','motion','occupancy'] as any },
-      { group: 'Add Sensor', key: 'new.create', title: 'Create sensor', type: 'boolean', description: 'Toggle ON e Save per creare.' },
+      { group: 'Add Sensor', key: 'new.id', title: 'New Sensor ID', placeholder: 'porta-ingresso', value: this.storage.getItem('new.id') || '' },
+      { group: 'Add Sensor', key: 'new.name', title: 'Name', placeholder: 'Porta Ingresso', value: this.storage.getItem('new.name') || '' },
+      { group: 'Add Sensor', key: 'new.kind', title: 'Type', value: this.storage.getItem('new.kind') || 'contact', choices: ['contact', 'motion', 'occupancy'] as any },
+      { group: 'Add Sensor', key: 'new.create', title: 'Create sensor', type: 'boolean', description: 'Fill the fields above and toggle this on to create the sensor. After creation, restart this plugin to see the accessory listed below. To show it in HomeKit, restart the HomeKit plugin as well.' },
     );
 
-    // ---- Sensors esistenti
+    // ---- UI per sensori esistenti ----
     for (const cfg of this.sensorsCfg) {
       const gid = `Sensor: ${cfg.name} [${cfg.id}]`;
-      out.push(
-        { group: gid, key: `sensor.${cfg.id}.id`, title: 'ID (read-only)', value: cfg.id, readonly: true, description: 'L’ID identifica il device. Evita spazi/puntini.' },
-        { group: gid, key: `sensor.${cfg.id}.name`, title: 'Name', value: cfg.name },
-        { group: gid, key: `sensor.${cfg.id}.kind`, title: 'Type', value: cfg.kind, choices: ['contact','motion','occupancy'] as any },
-        { group: gid, key: `sensor.${cfg.id}.renameTo`, title: 'Clone/Rename → New ID', placeholder: 'es. porta-sogg', description: 'Compila e Save per clonare con nuovo ID e rimuovere il vecchio.' },
-      );
-      if (cfg.kind === 'contact')
-        out.push({ group: gid, key: `sensor.${cfg.id}.topic.contact`,   title: 'Contact State Topic',   value: cfg.topics.contact || '' });
-      else if (cfg.kind === 'motion')
-        out.push({ group: gid, key: `sensor.${cfg.id}.topic.motion`,    title: 'Motion Detected Topic', value: cfg.topics.motion || '' });
-      else
-        out.push({ group: gid, key: `sensor.${cfg.id}.topic.occupancy`, title: 'Occupancy Detected Topic', value: cfg.topics.occupancy || '' });
 
       out.push(
+        { group: gid, key: `sensor.${cfg.id}.name`, title: 'Name', value: cfg.name },
+        { group: gid, key: `sensor.${cfg.id}.kind`, title: 'Type', value: cfg.kind, choices: ['contact', 'motion', 'occupancy'] as any },
+      );
+
+      // primary per tipo
+      if (cfg.kind === 'contact') {
+        out.push({ group: gid, key: `sensor.${cfg.id}.topic.contact`, title: 'Contact State Topic', value: cfg.topics.contact || '', placeholder: 'paradox/states/zones/XYZ/open' });
+      } else if (cfg.kind === 'motion') {
+        out.push({ group: gid, key: `sensor.${cfg.id}.topic.motion`, title: 'Motion Detected Topic', value: cfg.topics.motion || '', placeholder: 'paradox/states/zones/XYZ/open' });
+      } else {
+        out.push({ group: gid, key: `sensor.${cfg.id}.topic.occupancy`, title: 'Occupancy Detected Topic', value: cfg.topics.occupancy || '', placeholder: 'paradox/states/zones/XYZ/open' });
+      }
+
+      // extra opzionali
+      out.push(
         { group: gid, key: `sensor.${cfg.id}.topic.batteryLevel`, title: 'Battery Level Topic (0..100)', value: cfg.topics.batteryLevel || '' },
-        { group: gid, key: `sensor.${cfg.id}.topic.lowBattery`,  title: 'Low Battery Topic (bool)',      value: cfg.topics.lowBattery || '' },
-        { group: gid, key: `sensor.${cfg.id}.topic.tamper`,      title: 'Tamper Topic',                  value: cfg.topics.tamper || '' },
-        { group: gid, key: `sensor.${cfg.id}.topic.online`,      title: 'Online Topic',                  value: cfg.topics.online || '' },
+        { group: gid, key: `sensor.${cfg.id}.topic.lowBattery`,  title: 'Low Battery Topic (bool)', value: cfg.topics.lowBattery || '' },
+        { group: gid, key: `sensor.${cfg.id}.topic.tamper`,      title: 'Tamper Topic', value: cfg.topics.tamper || '' },
+        { group: gid, key: `sensor.${cfg.id}.topic.online`,      title: 'Online Topic', value: cfg.topics.online || '' },
         { group: gid, key: `sensor.${cfg.id}.remove`,            title: 'Remove sensor', type: 'boolean' },
       );
     }
@@ -264,119 +319,87 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
   }
 
   async putSetting(key: string, value: string | number | boolean): Promise<void> {
+    // salva sempre nella storage la value del campo (così resta in UI)
     this.storage.setItem(key, String(value));
 
-    // ---- Danger Zone: reset all ----
-    if (key === 'danger.resetSensors' && String(value) === 'true') {
-      this.storage.removeItem('danger.resetSensors');
-      // rimuovi device annunciati
-      try {
-        const dm: any = (sdk as any)?.deviceManager;
-        for (const nativeId of Array.from(this.devices.keys())) {
-          try { dm?.onDeviceRemoved?.(nativeId); } catch {}
-        }
-      } catch {}
-      this.devices.clear();
-      this.sensorsCfg = [];
-      this.saveSensorsToStorage();
-      this.safeDiscoverSensors(true);
-      await this.connectMqtt(true);
-      return;
-    }
-
-    // ---- Danger Zone: import JSON ----
-    if (key === 'danger.import') {
-      try {
-        const parsed = JSON.parse(String(value) || '[]') as SensorConfig[];
-        if (!Array.isArray(parsed)) throw new Error('JSON non è un array.');
-        // sanifica
-        this.sensorsCfg = (parsed || []).filter(x => x && x.id && x.name && x.kind && x.topics);
-        this.saveSensorsToStorage();
-        this.storage.removeItem('danger.import');
-        this.safeDiscoverSensors(true);
-        await this.connectMqtt(true);
-      } catch (e) {
-        this.console.error('Import JSON error:', e);
-      }
-      return;
-    }
-
-    // ---- Add Sensor ----
+    // --- Add Sensor workflow ---
     if (key === 'new.create' && String(value) === 'true') {
-      const id   = (this.storage.getItem('new.id') || '').trim();
+      const id = (this.storage.getItem('new.id') || '').trim();
       const name = (this.storage.getItem('new.name') || '').trim() || id;
       const kind = (this.storage.getItem('new.kind') || 'contact').trim() as SensorKind;
-      if (!id) { this.console.warn('Create sensor: id mancante'); return; }
-      if (this.sensorsCfg.find(s => s.id === id)) { this.console.warn('Create sensor: id già esistente'); return; }
+
+      if (!id) {
+        this.console.warn('Create sensor: id mancante');
+        return;
+      }
+      if (this.sensorsCfg.find(s => s.id === id)) {
+        this.console.warn('Create sensor: id già esistente');
+        return;
+      }
 
       this.sensorsCfg.push({ id, name, kind, topics: {} });
       this.saveSensorsToStorage();
 
-      this.storage.removeItem('new.id'); this.storage.removeItem('new.name');
-      this.storage.removeItem('new.kind'); this.storage.removeItem('new.create');
+      // pulisci i campi "new.*"
+      this.storage.removeItem('new.id');
+      this.storage.removeItem('new.name');
+      this.storage.removeItem('new.kind');
+      this.storage.removeItem('new.create');
 
-      this.safeDiscoverSensors(true);
+      await this.discoverSensors();
       await this.connectMqtt(true);
       return;
     }
 
-    // ---- Edit/Remove/Rename sensore ----
+    // --- Edit/Remove sensore esistente ---
     const m = key.match(/^sensor\.([^\.]+)\.(.+)$/);
     if (m) {
       const sid = m[1];
       const prop = m[2];
       const cfg = this.sensorsCfg.find(s => s.id === sid);
-      if (!cfg) { this.console.warn('putSetting: sensor non trovato', sid); return; }
-
-      // rename/clone
-      if (prop === 'renameTo') {
-        const newId = String(value).trim();
-        this.storage.removeItem(key);
-        if (!newId) return;
-        if (this.sensorsCfg.find(s => s.id === newId)) {
-          this.console.warn('renameTo: ID già esistente:', newId);
-          return;
-        }
-        const cloned: SensorConfig = { ...cfg, id: newId, name: cfg.name };
-        this.sensorsCfg.push(cloned);
-        // rimuovi vecchio
-        this.sensorsCfg = this.sensorsCfg.filter(s => s !== cfg);
-        try { (sdk as any)?.deviceManager?.onDeviceRemoved?.(`sensor:${sid}`); } catch {}
-        this.saveSensorsToStorage();
-        this.safeDiscoverSensors(true);
-        await this.connectMqtt(true);
+      if (!cfg) {
+        this.console.warn('putSetting: sensor non trovato', sid);
         return;
       }
 
-      // remove
       if (prop === 'remove' && String(value) === 'true') {
+        // elimina
         this.sensorsCfg = this.sensorsCfg.filter(s => s.id !== sid);
         this.saveSensorsToStorage();
-        try { (sdk as any)?.deviceManager?.onDeviceRemoved?.(`sensor:${sid}`); } catch {}
+
+        try {
+          this.devices.delete(`sensor:${sid}`);
+          (sdk as any)?.deviceManager?.onDeviceRemoved?.(`sensor:${sid}`);
+        } catch {}
+
+        // pulisci flag
         this.storage.removeItem(key);
-        this.safeDiscoverSensors(true);
+
+        await this.discoverSensors();
         await this.connectMqtt(true);
         return;
       }
 
-      // edit
-      if (prop === 'name') cfg.name = String(value);
-      else if (prop === 'kind') cfg.kind = String(value) as SensorKind;
-      else if (prop.startsWith('topic.')) {
+      if (prop === 'name') {
+        cfg.name = String(value);
+      } else if (prop === 'kind') {
+        cfg.kind = String(value) as SensorKind;
+      } else if (prop.startsWith('topic.')) {
         const tk = prop.substring('topic.'.length) as keyof SensorTopics;
         (cfg.topics as any)[tk] = String(value).trim();
       }
 
       this.saveSensorsToStorage();
-      this.safeDiscoverSensors(true);
+      await this.discoverSensors();
       await this.connectMqtt(true);
       return;
     }
 
-    // Altre impostazioni: riconnetti
+    // --- Altro (MQTT / Alarm settings) ---
     if (key === 'sensorsJson') {
+      // non più mostrato, ma se presente da vecchie versioni
       this.loadSensorsFromStorage();
-      this.safeDiscoverSensors(true);
+      await this.discoverSensors();
       await this.connectMqtt(true);
     } else {
       await this.connectMqtt(true);
@@ -385,12 +408,16 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
 
   /** ---- DeviceProvider ---- */
 
-  async getDevice(nativeId: string) { return this.devices.get(nativeId); }
+  async getDevice(nativeId: string) {
+    return this.devices.get(nativeId);
+  }
 
   async releaseDevice(_id: string, nativeId: string): Promise<void> {
     try {
       const dev = this.devices.get(nativeId);
-      if (dev) this.devices.delete(nativeId);
+      if (dev) {
+        this.devices.delete(nativeId);
+      }
       try { (sdk as any)?.deviceManager?.onDeviceRemoved?.(nativeId); } catch {}
     } catch (e) {
       this.console.warn('releaseDevice error', e);
@@ -401,6 +428,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     try {
       const raw = this.storage.getItem('sensorsJson') || '[]';
       const parsed: SensorConfig[] = JSON.parse(raw);
+      // sanitize
       this.sensorsCfg = (parsed || []).filter(x => x && x.id && x.name && x.kind && x.topics);
     } catch (e) {
       this.console.error('Invalid sensorsJson:', e);
@@ -408,40 +436,45 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     }
   }
 
-  /** Annuncia i sensori SOLO se deviceManager è pronto. */
-  private safeDiscoverSensors(triggeredByChange = false) {
+  /** ===== discoverSensors: annuncia PRIMA, istanzia DOPO (con retry se manager non pronto) ===== */
+  private async discoverSensors() {
     const dmAny: any = (sdk as any)?.deviceManager;
     if (!dmAny) {
-      if (!this.triedDiscoveryOnce) {
-        this.console.log('Device discovery postponed: deviceManager not ready yet.');
-        this.triedDiscoveryOnce = true;
-      }
+      this.console.warn('deviceManager not ready yet, retrying in 1s…');
+      setTimeout(() => this.discoverSensors().catch(e => this.console.error('discoverSensors retry error', e)), 1000);
       return;
     }
-    this.triedDiscoveryOnce = false;
-    this.discoverSensors(dmAny);
-  }
 
-  /** discoverSensors con deviceManager garantito */
-  private discoverSensors(dmAny: any) {
-    // 1) Manifests
+    // 1) Prepara i manifest
     const manifests = this.sensorsCfg.map(cfg => {
       const nativeId = `sensor:${cfg.id}`;
       const t = cfg.topics || {};
+
       const interfaces: TScryptedInterface[] = [ ScryptedInterface.Online ];
       if (t.tamper) interfaces.push(ScryptedInterface.TamperSensor);
+
       if (cfg.kind === 'contact') interfaces.unshift(ScryptedInterface.EntrySensor);
       else if (cfg.kind === 'motion') interfaces.unshift(ScryptedInterface.MotionSensor);
       else interfaces.unshift(ScryptedInterface.OccupancySensor);
+
       if (t.batteryLevel || t.lowBattery) interfaces.push(ScryptedInterface.Battery);
+
       return { nativeId, name: cfg.name, type: ScryptedDeviceType.Sensor, interfaces };
     });
 
     // 2) Annuncio
     if (typeof dmAny.onDevicesChanged === 'function') {
       dmAny.onDevicesChanged({ devices: manifests });
+      this.console.log('Annunciati (batch):', manifests.map(m => m.nativeId).join(', '));
     } else if (typeof dmAny.onDeviceDiscovered === 'function') {
-      for (const m of manifests) dmAny.onDeviceDiscovered(m);
+      for (const m of manifests) {
+        dmAny.onDeviceDiscovered(m);
+        this.console.log('Annunciato:', m.nativeId);
+      }
+    } else {
+      this.console.warn('deviceManager has no discovery methods yet, retrying in 1s…');
+      setTimeout(() => this.discoverSensors().catch(e => this.console.error('discoverSensors retry error', e)), 1000);
+      return;
     }
 
     // 3) Istanzia/aggiorna
@@ -456,18 +489,21 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
       } else {
         (dev as any).cfg = cfg;
       }
+
       const hasBattery = !!(cfg.topics.batteryLevel || cfg.topics.lowBattery);
-      if (hasBattery && (dev as any).batteryLevel === undefined)
+      if (hasBattery && (dev as any).batteryLevel === undefined) {
         (dev as any).batteryLevel = 100;
+      }
     }
 
-    // 4) Cleanup
+    // 4) Rimuovi quelli spariti
     const announced = new Set(manifests.map(m => m.nativeId));
     for (const [nativeId] of this.devices) {
       if (!announced.has(nativeId)) {
         try {
           this.devices.delete(nativeId);
-          dmAny.onDeviceRemoved?.(nativeId);
+          (sdk as any)?.deviceManager?.onDeviceRemoved?.(nativeId);
+          this.console.log('Rimosso:', nativeId);
         } catch {}
       }
     }
@@ -483,48 +519,73 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     const tls = this.storage.getItem('tls') === 'true';
     const rejectUnauthorized = this.storage.getItem('rejectUnauthorized') !== 'false';
 
-    const opts: IClientOptions = { clientId, username, password, clean: true, reconnectPeriod: 3000 };
-    if (tls) { (opts as any).protocol = 'mqtts'; (opts as any).rejectUnauthorized = rejectUnauthorized; }
+    const opts: IClientOptions = {
+      clientId,
+      username,
+      password,
+      clean: true,
+      reconnectPeriod: 3000,
+    };
+
+    if (tls) {
+      (opts as any).protocol = 'mqtts';
+      (opts as any).rejectUnauthorized = rejectUnauthorized;
+    }
+
     return { url, opts };
   }
 
   private collectAllSubscriptions(): string[] {
     const subs = new Set<string>();
-    for (const k of ['topicGetTarget','topicGetCurrent','topicTamper','topicOnline'] as const) {
-      const v = this.storage.getItem(k); if (v) subs.add(v);
+
+    // alarm
+    for (const k of ['topicGetTarget', 'topicGetCurrent', 'topicTamper', 'topicOnline']) {
+      const v = this.storage.getItem(k);
+      if (v) subs.add(v);
     }
+
+    // sensors
     for (const s of this.sensorsCfg) {
       const t = s.topics || {};
       [t.contact, t.motion, t.occupancy, t.batteryLevel, t.lowBattery, t.tamper, t.online]
-        .filter(Boolean).forEach(x => subs.add(String(x)));
+        .filter(Boolean)
+        .forEach(x => subs.add(String(x)));
     }
+
     return Array.from(subs);
   }
 
   private async connectMqtt(_reconnect = false) {
     const subs = this.collectAllSubscriptions();
 
-    if (!subs.length && !this.storage.getItem('topicSetTarget'))
+    if (!subs.length && !this.storage.getItem('topicSetTarget')) {
       this.console.warn('Configura almeno un topic nelle impostazioni.');
+    }
 
-    if (this.client) { try { this.client.end(true); } catch {}; this.client = undefined; }
+    if (this.client) {
+      try { this.client.end(true); } catch {}
+      this.client = undefined;
+    }
 
     const { url, opts } = this.getMqttOptions();
     this.console.log(`Connecting MQTT ${url} ...`);
     const client = mqtt.connect(url, opts);
     this.client = client;
 
+    // cache alarm topics for fast compare
     const tTarget = this.storage.getItem('topicGetTarget') || '';
     const tCurrent = this.storage.getItem('topicGetCurrent') || '';
-    const tTamper = this.storage.getItem('topicTamper') || '';
-    const tOnline = this.storage.getItem('topicOnline') || '';
+    const tTamper  = this.storage.getItem('topicTamper') || '';
+    const tOnline  = this.storage.getItem('topicOnline') || '';
 
     client.on('connect', () => {
       this.console.log('MQTT connected');
       this.online = true;
-      if (subs.length) client.subscribe(subs, { qos: 0 }, (err?: Error | null) => { if (err) this.console.error('subscribe error', err); });
-      // Al primo connect riprova ad annunciare i sensori
-      this.safeDiscoverSensors(true);
+      if (subs.length) {
+        client.subscribe(subs, { qos: 0 }, (err?: Error | null) => {
+          if (err) this.console.error('subscribe error', err);
+        });
+      }
     });
 
     client.on('reconnect', () => this.console.log('MQTT reconnecting...'));
@@ -536,24 +597,28 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
         const p = payload?.toString() ?? '';
         const np = normalize(p);
 
+        // ---- Alarm handling ----
         if (topic === tOnline) {
           if (truthy(np) || np === 'online') this.online = true;
-          if (falsy(np)  || np === 'offline') this.online = false;
+          if (falsy(np) || np === 'offline') this.online = false;
           return;
         }
 
         if (topic === tTamper) {
-          if (truthy(np) || ['tamper','intrusion','cover'].includes(np))
+          if (truthy(np) || ['tamper', 'intrusion', 'cover'].includes(np)) {
             this.tampered = (['cover','intrusion'].find(x => x === np) as any) || true;
-          else if (falsy(np)) this.tampered = false;
+          } else if (falsy(np)) {
+            this.tampered = false;
+          }
           return;
         }
 
         if (topic === tCurrent) {
           const mode = payloadToMode(payload);
-          const isAlarm = ['alarm','triggered'].includes(np);
+          const isAlarm = ['alarm', 'triggered'].includes(np);
           const current = this.securitySystemState || { mode: SecuritySystemMode.Disarmed };
-          this.securitySystemState = {
+
+          const newState = {
             mode: mode ?? current.mode,
             supportedModes: current.supportedModes ?? [
               SecuritySystemMode.Disarmed,
@@ -563,6 +628,8 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
             ],
             triggered: isAlarm || undefined,
           };
+
+          this.securitySystemState = newState;
           return;
         }
 
@@ -572,11 +639,10 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
           return;
         }
 
-        // Dispatch ai sensori + eventuale discover ritardato
-        if (this.triedDiscoveryOnce) this.safeDiscoverSensors(true);
-        for (const dev of this.devices.values())
+        // ---- Sensor dispatch ----
+        for (const dev of this.devices.values()) {
           dev.handleMqtt(topic, payload);
-
+        }
       } catch (e) {
         this.console.error('MQTT message handler error', e);
       }
@@ -595,15 +661,20 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     const qosNum = Number(this.storage.getItem('qos') || 0);
     const qos = Math.max(0, Math.min(2, isFinite(qosNum) ? qosNum : 0)) as 0 | 1 | 2;
 
-    this.client.publish(topic, payload, { qos, retain }, (err?: Error | null) => {
-      if (err) this.console.error('publish error', err);
-    });
+    this.client.publish(
+      topic,
+      payload,
+      { qos, retain },
+      (err?: Error | null) => {
+        if (err) this.console.error('publish error', err);
+      }
+    );
   }
 
   async armSecuritySystem(mode: TSecuritySystemMode): Promise<void> {
     const payload = this.getOutgoing(mode);
     this.console.log('armSecuritySystem', mode, '->', payload);
-    this.pendingTarget = mode;
+    this.pendingTarget = mode;     // memorizza target, ma NON cambiare il current
     this.publishSetTarget(payload);
   }
 
@@ -617,9 +688,9 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
   private getOutgoing(mode: TSecuritySystemMode) {
     const map: Record<number, string> = {
       [SecuritySystemMode.Disarmed]: this.storage.getItem('payloadDisarm') || DEFAULT_OUTGOING[SecuritySystemMode.Disarmed],
-      [SecuritySystemMode.HomeArmed]: this.storage.getItem('payloadHome')  || DEFAULT_OUTGOING[SecuritySystemMode.HomeArmed],
-      [SecuritySystemMode.AwayArmed]: this.storage.getItem('payloadAway')  || DEFAULT_OUTGOING[SecuritySystemMode.AwayArmed],
-      [SecuritySystemMode.NightArmed]: this.storage.getItem('payloadNight')|| DEFAULT_OUTGOING[SecuritySystemMode.NightArmed],
+      [SecuritySystemMode.HomeArmed]: this.storage.getItem('payloadHome') || DEFAULT_OUTGOING[SecuritySystemMode.HomeArmed],
+      [SecuritySystemMode.AwayArmed]: this.storage.getItem('payloadAway') || DEFAULT_OUTGOING[SecuritySystemMode.AwayArmed],
+      [SecuritySystemMode.NightArmed]: this.storage.getItem('payloadNight') || DEFAULT_OUTGOING[SecuritySystemMode.NightArmed],
     };
     return map[mode as unknown as number];
   }
