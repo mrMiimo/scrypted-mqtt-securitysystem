@@ -95,10 +95,27 @@ type SensorConfig = {
 abstract class BaseMqttSensor extends ScryptedDeviceBase implements Online, TamperSensor, Battery {
   protected cfg: SensorConfig;
 
+  // dichiariamo le proprietà per soddisfare le interfacce e permettere a TS di capire i tipi
+  online?: boolean;
+  tampered?: any;
+  batteryLevel?: number;
+
   constructor(nativeId: string, cfg: SensorConfig) {
     super(nativeId);
     this.cfg = cfg;
-    // non impostare stati qui: l'annuncio device deve avvenire prima
+  }
+
+  /** setter centralizzato: cambia lo stato SOLO se diverso e poi emette l'evento relativo */
+  private setAndEmit(prop: 'online'|'tampered'|'batteryLevel'|'entryOpen'|'motionDetected'|'occupied',
+                     val: any, iface: ScryptedInterface) {
+    const prev = (this as any)[prop];
+    if (prev === val) return;
+    (this as any)[prop] = val;
+    try {
+      this.onDeviceEvent(iface, val);
+    } catch (e) {
+      this.console?.warn?.('onDeviceEvent error', iface, e);
+    }
   }
 
   /** Called by parent on each MQTT message */
@@ -108,28 +125,27 @@ abstract class BaseMqttSensor extends ScryptedDeviceBase implements Online, Tamp
 
     // online
     if (topic === this.cfg.topics.online) {
-      if (truthy(np) || np === 'online') this.online = true;
-      if (falsy(np) || np === 'offline') this.online = false;
+      if (truthy(np) || np === 'online') this.setAndEmit('online', true, ScryptedInterface.Online);
+      if (falsy(np)  || np === 'offline') this.setAndEmit('online', false, ScryptedInterface.Online);
     }
 
     // tamper
     if (topic === this.cfg.topics.tamper) {
       if (truthy(np) || ['tamper', 'intrusion', 'cover', 'motion', 'magnetic'].includes(np)) {
-        (this as any).tampered = (['cover','intrusion','motion','magnetic'].find(x => x === np) as any) || true;
+        const value = (['cover','intrusion','motion','magnetic'].find(x => x === np) as any) || true;
+        this.setAndEmit('tampered', value, ScryptedInterface.TamperSensor);
       } else if (falsy(np)) {
-        (this as any).tampered = false;
+        this.setAndEmit('tampered', false, ScryptedInterface.TamperSensor);
       }
     }
 
     // battery
     if (topic === this.cfg.topics.batteryLevel) {
       const n = clamp(parseFloat(p), 0, 100);
-      if (isFinite(n)) (this as any).batteryLevel = n;
+      if (isFinite(n)) this.setAndEmit('batteryLevel', n, ScryptedInterface.Battery);
     } else if (topic === this.cfg.topics.lowBattery && !this.cfg.topics.batteryLevel) {
       // Solo se abbiamo lowBattery (booleano) ma NON batteryLevel:
-      // True  -> 10% (warning)
-      // False -> 100% (ok)
-      (this as any).batteryLevel = truthy(np) ? 10 : 100;
+      this.setAndEmit('batteryLevel', truthy(np) ? 10 : 100, ScryptedInterface.Battery);
     }
 
     // primary handled by subclasses
@@ -140,34 +156,51 @@ abstract class BaseMqttSensor extends ScryptedDeviceBase implements Online, Tamp
 }
 
 class ContactMqttSensor extends BaseMqttSensor implements EntrySensor {
-  constructor(nativeId: string, cfg: SensorConfig) {
-    super(nativeId, cfg);
-  }
+  entryOpen?: boolean;
   protected handlePrimary(topic: string, np: string, _raw: string) {
     if (topic === this.cfg.topics.contact) {
-      (this as any).entryOpen = truthy(np);
+      const v = truthy(np);
+      // usa il setter che emette l'evento di EntrySensor
+      (this as any).setAndEmit?.('entryOpen', v, ScryptedInterface.EntrySensor);
+      // fallback per sicurezza (in alcune minifiche setAndEmit non è visibile):
+      if ((this as any).setAndEmit === undefined) {
+        if (this.entryOpen !== v) {
+          this.entryOpen = v;
+          this.onDeviceEvent(ScryptedInterface.EntrySensor, v);
+        }
+      }
     }
   }
 }
 
 class MotionMqttSensor extends BaseMqttSensor implements MotionSensor {
-  constructor(nativeId: string, cfg: SensorConfig) {
-    super(nativeId, cfg);
-  }
+  motionDetected?: boolean;
   protected handlePrimary(topic: string, np: string, _raw: string) {
     if (topic === this.cfg.topics.motion) {
-      (this as any).motionDetected = truthy(np);
+      const v = truthy(np);
+      (this as any).setAndEmit?.('motionDetected', v, ScryptedInterface.MotionSensor);
+      if ((this as any).setAndEmit === undefined) {
+        if (this.motionDetected !== v) {
+          this.motionDetected = v;
+          this.onDeviceEvent(ScryptedInterface.MotionSensor, v);
+        }
+      }
     }
   }
 }
 
 class OccupancyMqttSensor extends BaseMqttSensor implements OccupancySensor {
-  constructor(nativeId: string, cfg: SensorConfig) {
-    super(nativeId, cfg);
-  }
+  occupied?: boolean;
   protected handlePrimary(topic: string, np: string, _raw: string) {
     if (topic === this.cfg.topics.occupancy) {
-      (this as any).occupied = truthy(np);
+      const v = truthy(np);
+      (this as any).setAndEmit?.('occupied', v, ScryptedInterface.OccupancySensor);
+      if ((this as any).setAndEmit === undefined) {
+        if (this.occupied !== v) {
+          this.occupied = v;
+          this.onDeviceEvent(ScryptedInterface.OccupancySensor, v);
+        }
+      }
     }
   }
 }
@@ -466,6 +499,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
       const hasBattery = !!(cfg.topics.batteryLevel || cfg.topics.lowBattery);
       if (hasBattery && (dev as any).batteryLevel === undefined) {
         (dev as any).batteryLevel = 100;
+        try { dev.onDeviceEvent(ScryptedInterface.Battery, 100); } catch {}
       }
     }
 
@@ -554,6 +588,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     client.on('connect', () => {
       this.console.log('MQTT connected');
       this.online = true;
+      try { this.onDeviceEvent(ScryptedInterface.Online, true); } catch {}
       if (subs.length) {
         client.subscribe(subs, { qos: 0 }, (err?: Error | null) => {
           if (err) this.console.error('subscribe error', err);
@@ -562,7 +597,11 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     });
 
     client.on('reconnect', () => this.console.log('MQTT reconnecting...'));
-    client.on('close', () => { this.console.log('MQTT closed'); this.online = false; });
+    client.on('close', () => { 
+      this.console.log('MQTT closed'); 
+      this.online = false; 
+      try { this.onDeviceEvent(ScryptedInterface.Online, false); } catch {}
+    });
     client.on('error', (e: Error) => { this.console.error('MQTT error', e); });
 
     client.on('message', (topic: string, payload: Buffer) => {
@@ -572,16 +611,19 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
 
         // ---- Alarm handling ----
         if (topic === tOnline) {
-          if (truthy(np) || np === 'online') this.online = true;
-          if (falsy(np) || np === 'offline') this.online = false;
+          if (truthy(np) || np === 'online') { this.online = true;  try { this.onDeviceEvent(ScryptedInterface.Online, true); } catch {} }
+          if (falsy(np)  || np === 'offline') { this.online = false; try { this.onDeviceEvent(ScryptedInterface.Online, false); } catch {} }
           return;
         }
 
         if (topic === tTamper) {
           if (truthy(np) || ['tamper', 'intrusion', 'cover'].includes(np)) {
-            (this as any).tampered = (['cover','intrusion'].find(x => x === np) as any) || true;
+            const val = (['cover','intrusion'].find(x => x === np) as any) || true;
+            (this as any).tampered = val;
+            try { this.onDeviceEvent(ScryptedInterface.TamperSensor, val); } catch {}
           } else if (falsy(np)) {
             (this as any).tampered = false;
+            try { this.onDeviceEvent(ScryptedInterface.TamperSensor, false); } catch {}
           }
           return;
         }
@@ -603,6 +645,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
           };
 
           this.securitySystemState = newState;
+          try { this.onDeviceEvent(ScryptedInterface.SecuritySystem, newState); } catch {}
           return;
         }
 
