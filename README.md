@@ -99,10 +99,6 @@ Add this plugin’s device to the HomeKit plugin **(not as a Standalone accessor
 - Nothing happens on arm/disarm? Verify the **Set Target** topic and outgoing payloads.
 - MQTT connection issues? Check broker URL, credentials, TLS, and network reachability.
 
----
-
-## Privacy
-You can set a noreply email in git to avoid exposing your name in commit metadata. For npm, ensure your account privacy settings are configured appropriately.
 
 ---
 
