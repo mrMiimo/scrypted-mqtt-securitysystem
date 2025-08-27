@@ -317,14 +317,14 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
       { group: 'Parsing / State tokens', key: 'triggeredValues', title: 'Triggered tokens (JSON array)', placeholder: '["triggered","alarm"]', value: this.storage.getItem('triggeredValues') || '["triggered","alarm"]' },
 
       // --- Publish Payloads (override) ---
-      { group: 'Publish Payloads (override)', key: 'payloadDisarm', title: 'Payload for Disarm', placeholder: 'disarmed', value: this.storage.getItem('payloadDisarm') || '' , description: 'Se vuoto: usa targetStateValues (strict ON) o i default arm_*/disarm (strict OFF).' },
+      { group: 'Publish Payloads (override)', key: 'payloadDisarm', title: 'Payload for Disarm', placeholder: 'disarmed', value: this.storage.getItem('payloadDisarm') || '' , description: 'If empty, use targetStateValues (strict ON) or the arm_*/disarm defaults (strict OFF).' },
       { group: 'Publish Payloads (override)', key: 'payloadHome',  title: 'Payload for Home Armed', placeholder: 'armed_home', value: this.storage.getItem('payloadHome') || '' },
       { group: 'Publish Payloads (override)', key: 'payloadAway',  title: 'Payload for Away Armed', placeholder: 'armed_away', value: this.storage.getItem('payloadAway') || '' },
       { group: 'Publish Payloads (override)', key: 'payloadNight', title: 'Payload for Night Armed', placeholder: 'armed_night', value: this.storage.getItem('payloadNight') || '' },
 
       // --- Logging ---
       { group: 'Logging', key: 'logSensors', title: 'Log sensor state changes', type: 'boolean', value: this.storage.getItem('logSensors') === 'true' },
-      { group: 'Logging', key: 'logMqttAll', title: 'Log ALL MQTT messages', type: 'boolean', value: this.storage.getItem('logMqttAll') === 'true', description: 'Attenzione: molto verboso.' },
+      { group: 'Logging', key: 'logMqttAll', title: 'Log ALL MQTT messages', type: 'boolean', value: this.storage.getItem('logMqttAll') === 'true', description: 'Warning: this will be very verbose.' },
     ];
 
     // ---- UI Add Sensor ----
