@@ -99,7 +99,7 @@ abstract class BaseMqttSensor extends ScryptedDeviceBase implements Online, Tamp
   }
 
   /** setter centralizzato + evento + (log opzionale) */
-  private setAndEmit(
+  protected setAndEmit(
     prop: 'online'|'tampered'|'batteryLevel'|'entryOpen'|'motionDetected'|'occupied',
     val: any,
     iface: ScryptedInterface,
