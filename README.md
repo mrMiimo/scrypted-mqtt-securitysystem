@@ -1,6 +1,6 @@
-# Paradox MQTT SecuritySystem (Scrypted)
+# MQTT SecuritySystem (Scrypted)
 
-Control and sync a Paradox (PAI/PAI-MQTT–like) alarm via MQTT, exposed in Scrypted as a **SecuritySystem**. Optional child sensors (contact, motion, occupancy) can also be surfaced.
+Control and sync alarm panels over MQTT (e.g. Paradox with PAI/PAI-MQTT), exposed in Scrypted as a **SecuritySystem**. Optional child sensors (contact, motion, occupancy) can also be integrated.
 
 ---
 
