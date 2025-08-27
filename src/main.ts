@@ -20,10 +20,10 @@ const {
   ScryptedInterface,    // valore (enum)
   SecuritySystemMode,   // valore (enum)
   systemManager,
-  deviceManager,
+  // ⚠️ NON destrutturare deviceManager: va letto sempre "al volo" da sdk.deviceManager.
 } = sdk;
 
-// Importa SOLO i TIPI e dai alias dove servono
+// Importa SOLO i TIPI (per non rompere i valori runtime)
 import type {
   Settings,
   Setting,
@@ -118,7 +118,7 @@ type SensorConfig = {
 abstract class BaseMqttSensor extends ScryptedDeviceBase implements Online, TamperSensor, Battery {
   protected cfg: SensorConfig;
 
-  // dichiarazioni per soddisfare le interfacce
+  // proprietà richieste dalle interfacce
   online?: boolean;
   tampered?: any;
   batteryLevel?: number;
@@ -369,7 +369,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
 
         try {
           this.devices.delete(`sensor:${sid}`);
-          deviceManager.onDeviceRemoved?.(`sensor:${sid}`);
+          (sdk as any)?.deviceManager?.onDeviceRemoved?.(`sensor:${sid}`);
         } catch {}
 
         // pulisci flag
@@ -418,7 +418,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
       if (dev) {
         this.devices.delete(nativeId);
       }
-      try { deviceManager.onDeviceRemoved?.(nativeId); } catch {}
+      try { (sdk as any)?.deviceManager?.onDeviceRemoved?.(nativeId); } catch {}
     } catch (e) {
       this.console.warn('releaseDevice error', e);
     }
@@ -436,44 +436,48 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     }
   }
 
-  /** ===== discoverSensors: annuncia PRIMA, istanzia DOPO ===== */
+  /** ===== discoverSensors: annuncia PRIMA, istanzia DOPO (con retry se manager non pronto) ===== */
   private async discoverSensors() {
-    // 1) Prepara i manifest (niente istanze qui)
+    const dmAny: any = (sdk as any)?.deviceManager;
+    if (!dmAny) {
+      this.console.warn('deviceManager not ready yet, retrying in 1s…');
+      setTimeout(() => this.discoverSensors().catch(e => this.console.error('discoverSensors retry error', e)), 1000);
+      return;
+    }
+
+    // 1) Prepara i manifest
     const manifests = this.sensorsCfg.map(cfg => {
       const nativeId = `sensor:${cfg.id}`;
       const t = cfg.topics || {};
 
       const interfaces: TScryptedInterface[] = [ ScryptedInterface.Online ];
-
-      // Tamper solo se c'è un topic tamper
       if (t.tamper) interfaces.push(ScryptedInterface.TamperSensor);
 
-      // Interfaccia primaria
       if (cfg.kind === 'contact') interfaces.unshift(ScryptedInterface.EntrySensor);
       else if (cfg.kind === 'motion') interfaces.unshift(ScryptedInterface.MotionSensor);
       else interfaces.unshift(ScryptedInterface.OccupancySensor);
 
-      // Battery solo se previsto
-      if (t.batteryLevel || t.lowBattery) {
-        interfaces.push(ScryptedInterface.Battery);
-      }
+      if (t.batteryLevel || t.lowBattery) interfaces.push(ScryptedInterface.Battery);
 
       return { nativeId, name: cfg.name, type: ScryptedDeviceType.Sensor, interfaces };
     });
 
     // 2) Annuncio
-    const dmAny: any = deviceManager as any;
     if (typeof dmAny.onDevicesChanged === 'function') {
       dmAny.onDevicesChanged({ devices: manifests });
       this.console.log('Annunciati (batch):', manifests.map(m => m.nativeId).join(', '));
-    } else {
+    } else if (typeof dmAny.onDeviceDiscovered === 'function') {
       for (const m of manifests) {
-        deviceManager.onDeviceDiscovered(m);
+        dmAny.onDeviceDiscovered(m);
         this.console.log('Annunciato:', m.nativeId);
       }
+    } else {
+      this.console.warn('deviceManager has no discovery methods yet, retrying in 1s…');
+      setTimeout(() => this.discoverSensors().catch(e => this.console.error('discoverSensors retry error', e)), 1000);
+      return;
     }
 
-    // 3) Istanzia/aggiorna DOPO l’annuncio
+    // 3) Istanzia/aggiorna
     for (const cfg of this.sensorsCfg) {
       const nativeId = `sensor:${cfg.id}`;
       let dev = this.devices.get(nativeId);
@@ -486,7 +490,6 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
         (dev as any).cfg = cfg;
       }
 
-      // Default “OK” se abbiamo Battery ma nessun valore ancora ricevuto
       const hasBattery = !!(cfg.topics.batteryLevel || cfg.topics.lowBattery);
       if (hasBattery && (dev as any).batteryLevel === undefined) {
         (dev as any).batteryLevel = 100;
@@ -499,7 +502,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
       if (!announced.has(nativeId)) {
         try {
           this.devices.delete(nativeId);
-          deviceManager.onDeviceRemoved?.(nativeId);
+          (sdk as any)?.deviceManager?.onDeviceRemoved?.(nativeId);
           this.console.log('Rimosso:', nativeId);
         } catch {}
       }
