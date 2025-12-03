@@ -155,7 +155,7 @@ abstract class BaseMqttSensor extends ScryptedDeviceBase implements Online, Tamp
       return;
     }
 
-    // 4) LOW BATTERY (bool)
+        // 4) LOW BATTERY (bool)
     if (topic === topics.lowBattery) {
       const isLow =
         np === 'true' ||
@@ -167,15 +167,20 @@ abstract class BaseMqttSensor extends ScryptedDeviceBase implements Online, Tamp
 
       (this as any).lowBattery = isLow;
 
-      try {
-        this.onDeviceEvent(ScryptedInterface.Battery, isLow);
-      } catch (e) {
-        this.console?.warn?.('Battery low event error', e);
-      }
+      // Simula anche la percentuale per HomeKit/Scrypted:
+      // low  -> 10%
+      // ok   -> 100%
+      const level = isLow ? 10 : 100;
+
+      this.setAndEmit('batteryLevel', level, ScryptedInterface.Battery, {
+        topic,
+        raw,
+        propLabel: 'batteryLevel(from lowBattery)',
+      });
 
       if (RUNTIME.logSensors) {
         this.console?.log?.(
-          `[Sensor] ${this.cfg.name} [${this.cfg.id}] lowBattery -> ${isLow} (${topic}="${raw}")`,
+          `[Sensor] ${this.cfg.name} [${this.cfg.id}] lowBattery -> ${isLow}, level -> ${level} (${topic}="${raw}")`,
         );
       }
       return;
