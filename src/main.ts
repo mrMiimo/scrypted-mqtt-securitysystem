@@ -117,40 +117,86 @@ abstract class BaseMqttSensor extends ScryptedDeviceBase implements Online, Tamp
   }
 
   /** Called by parent on each MQTT message */
-  handleMqtt(topic: string, payload: Buffer) {
-    const raw = payload?.toString() ?? '';
-    const np = normalize(raw);
+handleMqtt(topic: string, payload: Buffer) {
+  const raw = payload?.toString() ?? '';
+  const np = normalize(raw);
 
-    // online
-    if (topic === this.cfg.topics.online) {
-      if (truthy(np) || np === 'online') this.setAndEmit('online', true,  ScryptedInterface.Online, { topic, raw, propLabel: 'online' });
-      if (falsy(np)  || np === 'offline') this.setAndEmit('online', false, ScryptedInterface.Online, { topic, raw, propLabel: 'online' });
-    }
-
-    // tamper
-    if (topic === this.cfg.topics.tamper) {
-      if (truthy(np) || ['tamper', 'intrusion', 'cover', 'motion', 'magnetic'].includes(np)) {
-        const value = (['cover','intrusion','motion','magnetic'].find(x => x === np) as any) || true;
-        this.setAndEmit('tampered', value, ScryptedInterface.TamperSensor, { topic, raw, propLabel: 'tampered' });
-      } else if (falsy(np)) {
-        this.setAndEmit('tampered', false, ScryptedInterface.TamperSensor, { topic, raw, propLabel: 'tampered' });
-      }
-    }
-
-    // battery
-    if (topic === this.cfg.topics.batteryLevel) {
-      const n = clamp(parseFloat(raw), 0, 100);
-      if (Number.isFinite(n)) this.setAndEmit('batteryLevel', n, ScryptedInterface.Battery, { topic, raw, propLabel: 'batteryLevel' });
-    } else if (topic === this.cfg.topics.lowBattery && !this.cfg.topics.batteryLevel) {
-      // solo se abbiamo lowBattery (bool) ma NON batteryLevel
-      if (truthy(np)) this.setAndEmit('batteryLevel', 10,  ScryptedInterface.Battery, { topic, raw, propLabel: 'batteryLevel (low)' });
-      else if (falsy(np) && this.batteryLevel === undefined)
-        this.setAndEmit('batteryLevel', 100, ScryptedInterface.Battery, { topic, raw, propLabel: 'batteryLevel (ok)' });
-    }
-
-    // primary handled by subclasses
-    this.handlePrimary(topic, np, raw);
+  // CONTACT
+  if (topic === this.topics.contact) {
+    const open = truthy(np) || np === 'open';
+    (this as any).contact = open;
+    try { this.onDeviceEvent(ScryptedInterface.BinarySensor, open); } catch {}
+    return;
   }
+
+  // MOTION
+  if (topic === this.topics.motion) {
+    const motion = truthy(np) || np === 'motion';
+    (this as any).motionDetected = motion;
+    try { this.onDeviceEvent(ScryptedInterface.MotionSensor, motion); } catch {}
+    return;
+  }
+
+  // OCCUPANCY
+  if (topic === this.topics.occupancy) {
+    const occ = truthy(np) || np === 'occupied';
+    (this as any).occupied = occ;
+    try { this.onDeviceEvent(ScryptedInterface.OccupancySensor, occ); } catch {}
+    return;
+  }
+
+  // TAMPER
+  if (topic === this.topics.tamper) {
+    if (truthy(np) || ['tamper', 'intrusion', 'cover'].includes(np)) {
+      const val = (['cover', 'intrusion'].find(x => x === np) as any) || true;
+      (this as any).tampered = val;
+      try { this.onDeviceEvent(ScryptedInterface.TamperSensor, val); } catch {}
+    } else if (falsy(np)) {
+      (this as any).tampered = false;
+      try { this.onDeviceEvent(ScryptedInterface.TamperSensor, false); } catch {}
+    }
+    return;
+  }
+
+  // ONLINE
+  if (topic === this.topics.online) {
+    const online = truthy(np) || np === 'online';
+    (this as any).online = online;
+    try { this.onDeviceEvent(ScryptedInterface.Online, online); } catch {}
+    return;
+  }
+
+  // 🔋 LOW BATTERY (bool) – QUI LA PATCH
+  if (topic === this.topics.lowBattery) {
+    const isLow =
+      np === 'true' ||
+      np === '1' ||
+      np === 'on' ||
+      np === 'low' ||
+      np === 'battery_low' ||
+      truthy(np);
+
+    (this as any).lowBattery = isLow;
+    try {
+      // per l’interfaccia Battery di Scrypted un booleano "low" è sufficiente
+      this.onDeviceEvent(ScryptedInterface.Battery, isLow);
+    } catch {}
+    return;
+  }
+
+  // 🔋 BATTERY LEVEL (0..100) – per quando userai Battery Level Topic
+  if (topic === this.topics.batteryLevel) {
+    const n = Number(raw);
+    if (isFinite(n)) {
+      const pct = Math.max(0, Math.min(100, n));
+      (this as any).batteryLevel = pct;
+      try {
+        this.onDeviceEvent(ScryptedInterface.Battery, { level: pct } as any);
+      } catch {}
+    }
+    return;
+  }
+}
 
   protected abstract handlePrimary(topic: string, np: string, raw: string): void;
 }
