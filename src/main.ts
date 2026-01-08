@@ -12,6 +12,7 @@ import sdk, {
   MotionSensor,
   OccupancySensor,
   Battery,
+  OnOff,
   ScryptedInterface,
 } from '@scrypted/sdk';
 
@@ -76,6 +77,8 @@ type SensorTopics = {
   lowBattery?: string;   // boolean; usato se manca batteryLevel
   tamper?: string;       // boolean / string
   online?: string;       // "online"/"offline" or bool
+  bypassSet?: string;    // publish bypass toggle
+  bypassState?: string;  // subscribe bypass state
 };
 
 type SensorConfig = {
@@ -83,24 +86,29 @@ type SensorConfig = {
   name: string;
   kind: SensorKind;
   topics: SensorTopics;
+  bypassOnPayload?: string;
+  bypassOffPayload?: string;
 };
 
-abstract class BaseMqttSensor extends ScryptedDeviceBase implements Online, TamperSensor, Battery {
+abstract class BaseMqttSensor extends ScryptedDeviceBase implements Online, TamperSensor, Battery, OnOff {
   protected cfg: SensorConfig;
+  private publish: (topic: string, payload: string) => void;
 
   // per soddisfare le interfacce
   online?: boolean;
   tampered?: any;
   batteryLevel?: number;
+  on?: boolean;
 
-  constructor(nativeId: string, cfg: SensorConfig) {
+  constructor(nativeId: string, cfg: SensorConfig, publish: (topic: string, payload: string) => void) {
     super(nativeId);
     this.cfg = cfg;
+    this.publish = publish;
   }
 
   /** setter centralizzato + evento + (log opzionale) */
   protected setAndEmit(
-    prop: 'online'|'tampered'|'batteryLevel'|'entryOpen'|'motionDetected'|'occupied',
+    prop: 'online'|'tampered'|'batteryLevel'|'entryOpen'|'motionDetected'|'occupied'|'on',
     val: any,
     iface: ScryptedInterface,
     logContext?: { topic?: string; raw?: string; propLabel?: string }
@@ -205,6 +213,48 @@ abstract class BaseMqttSensor extends ScryptedDeviceBase implements Online, Tamp
       }
       return;
     }
+
+    // 6) BYPASS STATE (OnOff)
+    if (topic === topics.bypassState) {
+      const isOn =
+        truthy(np) ||
+        np === 'bypassed' ||
+        np === 'bypass';
+      const isOff =
+        falsy(np) ||
+        np === 'clear_bypass' ||
+        np === 'not_bypassed' ||
+        np === 'clear';
+
+      if (isOn || isOff) {
+        this.setAndEmit('on', isOn, ScryptedInterface.OnOff, {
+          topic,
+          raw,
+          propLabel: 'bypass',
+        });
+      }
+      return;
+    }
+  }
+
+  async turnOn(): Promise<void> {
+    const topic = this.cfg.topics?.bypassSet;
+    if (!topic) {
+      this.console?.warn?.('Bypass topic non configurato.');
+      return;
+    }
+    const payload = (this.cfg.bypassOnPayload || 'bypass').trim() || 'bypass';
+    this.publish(topic, payload);
+  }
+
+  async turnOff(): Promise<void> {
+    const topic = this.cfg.topics?.bypassSet;
+    if (!topic) {
+      this.console?.warn?.('Bypass topic non configurato.');
+      return;
+    }
+    const payload = (this.cfg.bypassOffPayload || 'clear_bypass').trim() || 'clear_bypass';
+    this.publish(topic, payload);
   }
 
   protected abstract handlePrimary(topic: string, np: string, raw: string): void;
@@ -408,6 +458,10 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
         { group: gid, key: `sensor.${cfg.id}.topic.lowBattery`,  title: 'Low Battery Topic (bool)',      value: cfg.topics.lowBattery || '' },
         { group: gid, key: `sensor.${cfg.id}.topic.tamper`,      title: 'Tamper Topic',                  value: cfg.topics.tamper || '' },
         { group: gid, key: `sensor.${cfg.id}.topic.online`,      title: 'Online Topic',                  value: cfg.topics.online || '' },
+        { group: gid, key: `sensor.${cfg.id}.topic.bypassSet`,   title: 'Bypass Command Topic (publish)', value: cfg.topics.bypassSet || '', placeholder: 'paradox/control/zones/XYZ' },
+        { group: gid, key: `sensor.${cfg.id}.topic.bypassState`, title: 'Bypass State Topic (subscribe)', value: cfg.topics.bypassState || '', placeholder: 'paradox/states/zones/XYZ/bypassed' },
+        { group: gid, key: `sensor.${cfg.id}.bypassOnPayload`,   title: 'Bypass ON Payload', value: cfg.bypassOnPayload || 'bypass' },
+        { group: gid, key: `sensor.${cfg.id}.bypassOffPayload`,  title: 'Bypass OFF Payload', value: cfg.bypassOffPayload || 'clear_bypass' },
         { group: gid, key: `sensor.${cfg.id}.remove`,            title: 'Remove sensor', type: 'boolean' },
       );
     }
@@ -473,6 +527,8 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
 
       if (prop === 'name') cfg.name = String(value);
       else if (prop === 'kind') cfg.kind = String(value) as SensorKind;
+      else if (prop === 'bypassOnPayload') cfg.bypassOnPayload = String(value);
+      else if (prop === 'bypassOffPayload') cfg.bypassOffPayload = String(value);
       else if (prop.startsWith('topic.')) {
         const tk = prop.substring('topic.'.length) as keyof SensorTopics;
         (cfg.topics as any)[tk] = String(value).trim();
@@ -533,6 +589,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
       else interfaces.unshift(ScryptedInterface.OccupancySensor);
 
       if (t.tamper) interfaces.push(ScryptedInterface.TamperSensor);
+      if (t.bypassSet || t.bypassState) interfaces.push(ScryptedInterface.OnOff);
 
       // Battery solo se definita davvero
       if ((t.batteryLevel && t.batteryLevel.trim()) || (t.lowBattery && t.lowBattery.trim()))
@@ -558,9 +615,10 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
       const nativeId = `sensor:${cfg.id}`;
       let dev = this.devices.get(nativeId);
       if (!dev) {
-        if (cfg.kind === 'contact') dev = new ContactMqttSensor(nativeId, cfg);
-        else if (cfg.kind === 'motion') dev = new MotionMqttSensor(nativeId, cfg);
-        else dev = new OccupancyMqttSensor(nativeId, cfg);
+        const publish = (topic: string, payload: string) => this.publishToTopic(topic, payload);
+        if (cfg.kind === 'contact') dev = new ContactMqttSensor(nativeId, cfg, publish);
+        else if (cfg.kind === 'motion') dev = new MotionMqttSensor(nativeId, cfg, publish);
+        else dev = new OccupancyMqttSensor(nativeId, cfg, publish);
         this.devices.set(nativeId, dev);
       } else {
         (dev as any).cfg = cfg;
@@ -626,7 +684,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     // sensors
     for (const s of this.sensorsCfg) {
       const t = s.topics || {};
-      [t.contact, t.motion, t.occupancy, t.batteryLevel, t.lowBattery, t.tamper, t.online]
+      [t.contact, t.motion, t.occupancy, t.batteryLevel, t.lowBattery, t.tamper, t.online, t.bypassState]
         .filter((x) => !!x && String(x).trim().length > 0)
         .forEach(x => subs.add(String(x)));
     }
@@ -751,6 +809,21 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     this.client.publish(topic, payload, { qos, retain }, (err?: Error | null) => {
       if (err) this.console.error('publish error', err);
       else if (RUNTIME.logSensors) this.console.log(`[Alarm] published target "${payload}" to ${topic}`);
+    });
+  }
+
+  private publishToTopic(topic: string, payload: string) {
+    if (!this.client) {
+      this.console.warn('MQTT non configurato.');
+      return;
+    }
+    const retain = this.storage.getItem('retain') === 'true';
+    const qosNum = Number(this.storage.getItem('qos') || 0);
+    const qos = Math.max(0, Math.min(2, isFinite(qosNum) ? qosNum : 0)) as 0 | 1 | 2;
+
+    this.client.publish(topic, payload, { qos, retain }, (err?: Error | null) => {
+      if (err) this.console.error('publish error', err);
+      else if (RUNTIME.logSensors) this.console.log(`[Sensor] published "${payload}" to ${topic}`);
     });
   }
 
