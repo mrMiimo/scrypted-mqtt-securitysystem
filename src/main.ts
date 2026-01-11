@@ -269,7 +269,7 @@ class BypassMqttSwitch extends ScryptedDeviceBase implements OnOff {
     this.cfg = cfg;
   }
 
-  private setOn(
+  private setOnState(
     val: boolean,
     logContext?: { topic?: string; raw?: string; source?: string },
   ) {
@@ -288,8 +288,8 @@ class BypassMqttSwitch extends ScryptedDeviceBase implements OnOff {
     if (topic !== this.cfg.topics.state) return;
     const raw = payload?.toString() ?? '';
     const np = normalize(raw);
-    if (truthy(np)) this.setOn(true, { topic, raw, source: 'state' });
-    else if (falsy(np)) this.setOn(false, { topic, raw, source: 'state' });
+    if (truthy(np)) this.setOnState(true, { topic, raw, source: 'state' });
+    else if (falsy(np)) this.setOnState(false, { topic, raw, source: 'state' });
   }
 
   async turnOn(): Promise<void> {
@@ -299,7 +299,7 @@ class BypassMqttSwitch extends ScryptedDeviceBase implements OnOff {
     }
     const payload = (this.cfg.payloadOn || 'bypass').trim() || 'bypass';
     if (this.parent.publishBypass(this.cfg, payload))
-      this.setOn(true, { source: 'local' });
+      this.setOnState(true, { source: 'local' });
   }
 
   async turnOff(): Promise<void> {
@@ -309,7 +309,7 @@ class BypassMqttSwitch extends ScryptedDeviceBase implements OnOff {
     }
     const payload = (this.cfg.payloadOff || 'clear_bypass').trim() || 'clear_bypass';
     if (this.parent.publishBypass(this.cfg, payload))
-      this.setOn(false, { source: 'local' });
+      this.setOnState(false, { source: 'local' });
   }
 
   async setPowerState(on: boolean): Promise<void> {
