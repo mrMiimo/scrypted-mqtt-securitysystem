@@ -42,7 +42,8 @@
       "SecuritySystem",
       "Settings",
       "TamperSensor",
-      "Online"
+      "Online",
+      "DeviceProvider"
     ]
   }
 }

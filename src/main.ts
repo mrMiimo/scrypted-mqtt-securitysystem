@@ -316,6 +316,10 @@ class BypassMqttSwitch extends ScryptedDeviceBase implements OnOff {
     if (on) return this.turnOn();
     return this.turnOff();
   }
+
+  async setOn(on: boolean): Promise<void> {
+    return this.setPowerState(on);
+  }
 }
 
 /** ----------------- Main Plugin ----------------- */
@@ -682,6 +686,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
   /** ---- DeviceProvider ---- */
 
   async getDevice(nativeId: string) {
+    if (RUNTIME.logSensors) this.console.log(`[DeviceProvider] getDevice ${nativeId}`);
     const existing = this.devices.get(nativeId);
     if (existing) return existing;
 
@@ -796,7 +801,9 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     // 2) annuncio
     const dmAny: any = deviceManager as any;
     if (typeof dmAny.onDevicesChanged === 'function') {
-      dmAny.onDevicesChanged({ devices: manifests });
+      const payload: any = { devices: manifests };
+      if (this.nativeId) payload.providerNativeId = this.nativeId;
+      dmAny.onDevicesChanged(payload);
       this.console.log('Annunciati (batch):', manifests.map(m => m.nativeId).join(', '));
     } else {
       for (const m of manifests) {
