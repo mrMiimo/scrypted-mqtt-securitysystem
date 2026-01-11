@@ -1,6 +1,6 @@
 {
   "name": "@rfranzoi/scrypted-mqtt-securitysystem",
-  "version": "1.0.94",
+  "version": "1.0.95",
   "description": "Scrypted plugin: Paradox Security System via MQTT (PAI/PAI-MQTT style).",
   "license": "MIT",
   "main": "dist/main.nodejs.js",
