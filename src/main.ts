@@ -646,7 +646,8 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
       const hasBypass = !!(cfg.bypass?.control?.trim() || cfg.bypass?.state?.trim());
       if (hasBypass) interfaces.push(ScryptedInterface.OnOff);
 
-      manifests.push({ nativeId, name: cfg.name, type: ScryptedDeviceType.Sensor, interfaces });
+      const type = hasBypass ? ScryptedDeviceType.Switch : ScryptedDeviceType.Sensor;
+      manifests.push({ nativeId, name: cfg.name, type, interfaces });
     }
 
     // 2) annuncio
