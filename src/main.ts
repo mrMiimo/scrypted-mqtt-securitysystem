@@ -293,15 +293,28 @@ class BypassMqttSwitch extends ScryptedDeviceBase implements OnOff {
   }
 
   async turnOn(): Promise<void> {
+    if (RUNTIME.logSensors) {
+      const topic = this.cfg.topics?.control || '';
+      this.console?.log?.(`[Bypass] cmd ON ${this.cfg.zoneName} [${this.cfg.id}] -> ${topic}`);
+    }
     const payload = (this.cfg.payloadOn || 'bypass').trim() || 'bypass';
     if (this.parent.publishBypass(this.cfg, payload))
       this.setOn(true, { source: 'local' });
   }
 
   async turnOff(): Promise<void> {
+    if (RUNTIME.logSensors) {
+      const topic = this.cfg.topics?.control || '';
+      this.console?.log?.(`[Bypass] cmd OFF ${this.cfg.zoneName} [${this.cfg.id}] -> ${topic}`);
+    }
     const payload = (this.cfg.payloadOff || 'clear_bypass').trim() || 'clear_bypass';
     if (this.parent.publishBypass(this.cfg, payload))
       this.setOn(false, { source: 'local' });
+  }
+
+  async setPowerState(on: boolean): Promise<void> {
+    if (on) return this.turnOn();
+    return this.turnOff();
   }
 }
 
@@ -668,7 +681,44 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
 
   /** ---- DeviceProvider ---- */
 
-  async getDevice(nativeId: string) { return this.devices.get(nativeId); }
+  async getDevice(nativeId: string) {
+    const existing = this.devices.get(nativeId);
+    if (existing) return existing;
+
+    if (nativeId.startsWith('sensor:')) {
+      const sid = nativeId.substring('sensor:'.length);
+      const cfg = this.sensorsCfg.find(s => s.id === sid);
+      if (!cfg) return undefined;
+
+      let dev: BaseMqttSensor;
+      if (cfg.kind === 'contact') dev = new ContactMqttSensor(nativeId, cfg);
+      else if (cfg.kind === 'motion') dev = new MotionMqttSensor(nativeId, cfg);
+      else dev = new OccupancyMqttSensor(nativeId, cfg);
+      this.devices.set(nativeId, dev);
+
+      const hasBattery = !!(cfg.topics.batteryLevel && cfg.topics.batteryLevel.trim())
+                      || !!(cfg.topics.lowBattery && cfg.topics.lowBattery.trim());
+      if (hasBattery && (dev as any).batteryLevel === undefined) {
+        (dev as any).batteryLevel = 100;
+        try { dev.onDeviceEvent(ScryptedInterface.Battery, 100); } catch {}
+      }
+
+      return dev;
+    }
+
+    if (nativeId.startsWith('bypass:')) {
+      const bid = nativeId.substring('bypass:'.length);
+      const cfg = this.bypassCfg.find(b => b.id === bid);
+      if (!cfg) return undefined;
+
+      const dev = new BypassMqttSwitch(nativeId, cfg, this);
+      if (dev.on === undefined) dev.on = false;
+      this.devices.set(nativeId, dev);
+      return dev;
+    }
+
+    return undefined;
+  }
 
   async releaseDevice(_id: string, nativeId: string): Promise<void> {
     try {
@@ -986,6 +1036,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
       return false;
     }
     const { qos, retain } = this.getPublishOptions();
+    if (RUNTIME.logSensors) this.console.log(`[Bypass] publish -> ${topic} payload="${payload}"`);
     this.client.publish(topic, payload, { qos, retain }, (err?: Error | null) => {
       if (err) this.console.error('publish error', err);
       else if (RUNTIME.logSensors) this.console.log(`[Bypass] published "${payload}" to ${topic}`);
