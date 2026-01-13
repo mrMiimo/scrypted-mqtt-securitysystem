@@ -8,6 +8,7 @@ Control and sync alarm panels over MQTT (e.g. Paradox with PAI/PAI-MQTT), expose
 - Arm/Disarm: Disarmed, Home, Away, Night.
 - MQTT topics for current/target state, tamper, and online.
 - Optional per‑sensor MQTT bindings (contact/motion/occupancy) with battery, tamper, and online status.
+- Optional per‑sensor **Bypass** switch via MQTT topics.
 - HomeKit: usable through the official Scrypted HomeKit plugin (non-standalone accessory).
 
 ---
@@ -60,6 +61,10 @@ Each sensor has:
   - Motion: `your/zones/hallway/motion`
   - Occupancy: `your/rooms/office/occupied`
   - Optional: `batteryLevel` (0..100), `lowBattery` (boolean), `tamper`, `online`
+- **bypass (optional)**:
+  - **Bypass Control Topic**: publish a bypass command for that zone.
+  - **Bypass State Topic**: subscribe to the actual bypass state.
+  - **Bypass Payload ON/OFF**: defaults to `bypass` / `clear_bypass`.
 
 ### Creating Sensors from the UI
 - Fill the fields for **ID**, **Name**, **Kind**, and desired **Topics**.
@@ -68,6 +73,11 @@ Each sensor has:
 - If you’re using HomeKit, **restart the HomeKit plugin** to see newly added accessories.
 
 > Only the capabilities for which topics are provided will be exposed (e.g., no low‑battery if no related topic is set).
+
+### Bypass Switch (Optional)
+If you configure bypass topics for a sensor, the plugin exposes an extra switch accessory named **`<Zone Name> Bypass`**.
+Turning the switch **On/Off** publishes to the **Bypass Control Topic** with the configured payloads, and the
+**Bypass State Topic** keeps the switch in sync (if provided).
 
 ---
 
@@ -83,6 +93,7 @@ Add this plugin’s device to the HomeKit plugin **(not as a Standalone accessor
 - **Get Current** (subscribe): `alarm/states/partition_1/current_state`
 - **Tamper** (subscribe): `alarm/states/system/tamper`
 - **Online** (subscribe): `alarm/interface/availability` (`online`/`offline`)
+- **Zone Bypass** (optional): publish to `alarm/control/zones/front-door`, state from `alarm/states/zones/front-door/bypassed`
 
 ---
 
