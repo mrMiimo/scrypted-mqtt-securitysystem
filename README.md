@@ -7,6 +7,7 @@ Control and sync alarm panels over MQTT (e.g. Paradox with PAI/PAI-MQTT), expose
 ## Features
 - Arm/Disarm: Disarmed, Home, Away, Night.
 - MQTT topics for current/target state, tamper, and online.
+- Multiple partition support through additional child **SecuritySystem** devices.
 - Optional per‑sensor MQTT bindings (contact/motion/occupancy) with battery, tamper, and online status.
 - Optional per‑sensor **Bypass** switch via MQTT topics.
 - HomeKit: usable through the official Scrypted HomeKit plugin (non-standalone accessory).
@@ -37,6 +38,22 @@ Then in **Scrypted → Manage Plugins → Install
 - **Get Current State (subscribe)**: topic reflecting the *actual* alarm state.
 - **Get Status Tampered (subscribe)**: tamper status.
 - **Get Online (subscribe)**: online/offline indicator of the alarm bridge.
+
+### Partitions
+The main plugin device keeps the legacy single-partition alarm topics above. For panels with multiple
+areas/partitions, use **Add Partition** in Settings to create one child **SecuritySystem** per area.
+
+For example:
+- **Casa**
+  - Set Target: `paradox/control/partitions/Casa`
+  - Get Target: `paradox/states/partitions/Casa/target_state`
+  - Get Current: `paradox/states/partitions/Casa/current_state`
+- **Cantina**
+  - Set Target: `paradox/control/partitions/Cantina`
+  - Get Target: `paradox/states/partitions/Cantina/target_state`
+  - Get Current: `paradox/states/partitions/Cantina/current_state`
+
+Each partition is exposed as a separate Scrypted security system and can be added separately to HomeKit.
 
 ### Publish Options
 - **QoS** / **Retain**

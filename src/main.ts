@@ -94,6 +94,16 @@ type SensorConfig = {
   bypass?: SensorBypass;
 };
 
+type PartitionConfig = {
+  id: string;
+  name: string;
+  topicSetTarget?: string;
+  topicGetTarget?: string;
+  topicGetCurrent?: string;
+  topicTamper?: string;
+  topicOnline?: string;
+};
+
 type BypassTopics = {
   control?: string;
   state?: string;
@@ -358,6 +368,89 @@ class BypassMqttSwitch extends ScryptedDeviceBase implements OnOff {
   }
 }
 
+class PartitionMqttSecuritySystem extends ScryptedDeviceBase implements SecuritySystem, TamperSensor, Online {
+  private cfg: PartitionConfig;
+  private parent: ParadoxMqttSecuritySystem;
+  online?: boolean;
+  tampered?: any;
+  private pendingTarget?: SecuritySystemMode;
+
+  constructor(nativeId: string, cfg: PartitionConfig, parent: ParadoxMqttSecuritySystem) {
+    super(nativeId);
+    this.cfg = cfg;
+    this.parent = parent;
+    this.securitySystemState = this.securitySystemState || parent.defaultSecuritySystemState();
+    this.online = this.online ?? false;
+  }
+
+  updateConfig(cfg: PartitionConfig) {
+    this.cfg = cfg;
+  }
+
+  handleMqtt(topic: string, payload: Buffer) {
+    const raw = payload?.toString() ?? '';
+    const np = normalize(raw);
+
+    if (topic === this.cfg.topicOnline) {
+      if (truthy(np) || np === 'online') {
+        this.online = true;
+        try { this.onDeviceEvent(ScryptedInterface.Online, true); } catch {}
+      } else if (falsy(np) || np === 'offline') {
+        this.online = false;
+        try { this.onDeviceEvent(ScryptedInterface.Online, false); } catch {}
+      }
+      return;
+    }
+
+    if (topic === this.cfg.topicTamper) {
+      if (truthy(np) || ['tamper', 'intrusion', 'cover'].includes(np)) {
+        const val = (['cover', 'intrusion'].find(x => x === np) as any) || true;
+        this.tampered = val;
+        try { this.onDeviceEvent(ScryptedInterface.TamperSensor, val); } catch {}
+      } else if (falsy(np)) {
+        this.tampered = false;
+        try { this.onDeviceEvent(ScryptedInterface.TamperSensor, false); } catch {}
+      }
+      return;
+    }
+
+    if (topic === this.cfg.topicGetCurrent) {
+      const mode = this.parent.parseIncomingMode(payload);
+      const isAlarm = this.parent.isTriggeredToken(np);
+      const current = this.securitySystemState || this.parent.defaultSecuritySystemState();
+      const newState = {
+        mode: mode ?? current.mode,
+        supportedModes: current.supportedModes ?? this.parent.supportedSecuritySystemModes(),
+        triggered: isAlarm || undefined,
+      };
+
+      this.securitySystemState = newState;
+      try { this.onDeviceEvent(ScryptedInterface.SecuritySystem, newState); } catch {}
+      if (RUNTIME.logSensors) this.console?.log?.(`[Partition] ${this.cfg.name} current: mode=${newState.mode} triggered=${!!newState.triggered} (${topic}="${raw}")`);
+      return;
+    }
+
+    if (topic === this.cfg.topicGetTarget) {
+      this.pendingTarget = this.parent.parseIncomingMode(payload);
+      if (RUNTIME.logSensors) this.console?.log?.(`[Partition] ${this.cfg.name} target reported: "${raw}" -> ${this.pendingTarget}`);
+    }
+  }
+
+  async armSecuritySystem(mode: SecuritySystemMode): Promise<void> {
+    const payload = this.parent.getOutgoing(mode);
+    this.console?.log?.('armSecuritySystem', this.cfg.name, mode, '->', payload);
+    this.pendingTarget = mode;
+    this.parent.publishSetTargetTo(this.cfg.topicSetTarget, payload, this.cfg.name);
+  }
+
+  async disarmSecuritySystem(): Promise<void> {
+    const payload = this.parent.getOutgoing(SecuritySystemMode.Disarmed);
+    this.console?.log?.('disarmSecuritySystem', this.cfg.name, '->', payload);
+    this.pendingTarget = SecuritySystemMode.Disarmed;
+    this.parent.publishSetTargetTo(this.cfg.topicSetTarget, payload, this.cfg.name);
+  }
+}
+
 /** ----------------- Main Plugin ----------------- */
 
 class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
@@ -367,7 +460,8 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
 
   // device management
   private sensorsCfg: SensorConfig[] = [];
-  private devices = new Map<string, BaseMqttSensor | BypassMqttSwitch>();
+  private partitionsCfg: PartitionConfig[] = [];
+  private devices = new Map<string, BaseMqttSensor | BypassMqttSwitch | PartitionMqttSecuritySystem>();
 
   // remember target while waiting current
   private pendingTarget?: SecuritySystemMode;
@@ -386,16 +480,12 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     // Default state
     this.securitySystemState = this.securitySystemState || {
       mode: SecuritySystemMode.Disarmed,
-      supportedModes: [
-        SecuritySystemMode.Disarmed,
-        SecuritySystemMode.HomeArmed,
-        SecuritySystemMode.AwayArmed,
-        SecuritySystemMode.NightArmed,
-      ],
+      supportedModes: this.supportedSecuritySystemModes(),
     };
     this.online = this.online ?? false;
 
     // Load configs and announce devices
+    this.loadPartitionsFromStorage();
     this.loadSensorsFromStorage();
     this.discoverDevices().catch(e => this.console.error('discoverDevices error', e));
 
@@ -423,7 +513,21 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
   private useStrict(): boolean {
     return this.storage.getItem('strictParsing') === 'true';
   }
-  private parseIncomingMode(payload: string | Buffer | undefined): SecuritySystemMode | undefined {
+  supportedSecuritySystemModes(): SecuritySystemMode[] {
+    return [
+      SecuritySystemMode.Disarmed,
+      SecuritySystemMode.HomeArmed,
+      SecuritySystemMode.AwayArmed,
+      SecuritySystemMode.NightArmed,
+    ];
+  }
+  defaultSecuritySystemState() {
+    return {
+      mode: SecuritySystemMode.Disarmed,
+      supportedModes: this.supportedSecuritySystemModes(),
+    };
+  }
+  parseIncomingMode(payload: string | Buffer | undefined): SecuritySystemMode | undefined {
     const np = normalize(payload?.toString?.() ?? String(payload ?? ''));
     if (!this.useStrict()) return payloadToModeLoose(np);
 
@@ -436,7 +540,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     if (currentVals.has('armed_night') && np === 'armed_night') return SecuritySystemMode.NightArmed;
     return undefined;
   }
-  private isTriggeredToken(np: string): boolean {
+  isTriggeredToken(np: string): boolean {
     if (this.useStrict()) {
       const triggered = new Set(this.parseJsonArray('triggeredValues', ['triggered','alarm']));
       return triggered.has(np);
@@ -460,6 +564,11 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
   private saveSensorsToStorage() {
     try { this.storage.setItem('sensorsJson', JSON.stringify(this.sensorsCfg)); }
     catch (e) { this.console.error('saveSensorsToStorage error', e); }
+  }
+
+  private savePartitionsToStorage() {
+    try { this.storage.setItem('partitionsJson', JSON.stringify(this.partitionsCfg)); }
+    catch (e) { this.console.error('savePartitionsToStorage error', e); }
   }
 
   /** ---- Settings UI ---- */
@@ -499,6 +608,31 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
       { group: 'Logging', key: 'logSensors', title: 'Log sensor state changes', type: 'boolean', value: this.storage.getItem('logSensors') === 'true' },
       { group: 'Logging', key: 'logMqttAll', title: 'Log ALL MQTT messages', type: 'boolean', value: this.storage.getItem('logMqttAll') === 'true', description: 'Warning: this will be very verbose.' },
     ];
+
+    // ---- UI Add Partition ----
+    out.push(
+      { group: 'Add Partition', key: 'newPartition.id', title: 'New Partition ID', placeholder: 'casa', value: this.storage.getItem('newPartition.id') || '' },
+      { group: 'Add Partition', key: 'newPartition.name', title: 'Name', placeholder: 'Casa', value: this.storage.getItem('newPartition.name') || '' },
+      { group: 'Add Partition', key: 'newPartition.topicSetTarget', title: 'Set Target State (publish)', placeholder: 'paradox/control/partitions/Casa', value: this.storage.getItem('newPartition.topicSetTarget') || '' },
+      { group: 'Add Partition', key: 'newPartition.topicGetTarget', title: 'Get Target State (subscribe)', placeholder: 'paradox/states/partitions/Casa/target_state', value: this.storage.getItem('newPartition.topicGetTarget') || '' },
+      { group: 'Add Partition', key: 'newPartition.topicGetCurrent', title: 'Get Current State (subscribe)', placeholder: 'paradox/states/partitions/Casa/current_state', value: this.storage.getItem('newPartition.topicGetCurrent') || '' },
+      { group: 'Add Partition', key: 'newPartition.topicTamper', title: 'Get Status Tampered (subscribe)', placeholder: 'paradox/states/system/troubles/zone_tamper_trouble', value: this.storage.getItem('newPartition.topicTamper') || '' },
+      { group: 'Add Partition', key: 'newPartition.topicOnline', title: 'Get Online (subscribe)', placeholder: 'paradox/interface/availability', value: this.storage.getItem('newPartition.topicOnline') || '' },
+      { group: 'Add Partition', key: 'newPartition.create', title: 'Create partition', type: 'boolean', description: 'Fill the fields above and toggle this on to create a separate SecuritySystem device.' },
+    );
+
+    for (const cfg of this.partitionsCfg) {
+      const gid = `Partition: ${cfg.name} [${cfg.id}]`;
+      out.push(
+        { group: gid, key: `partition.${cfg.id}.name`, title: 'Name', value: cfg.name },
+        { group: gid, key: `partition.${cfg.id}.topicSetTarget`, title: 'Set Target State (publish)', value: cfg.topicSetTarget || '', placeholder: `paradox/control/partitions/${cfg.name}` },
+        { group: gid, key: `partition.${cfg.id}.topicGetTarget`, title: 'Get Target State (subscribe)', value: cfg.topicGetTarget || '', placeholder: `paradox/states/partitions/${cfg.name}/target_state` },
+        { group: gid, key: `partition.${cfg.id}.topicGetCurrent`, title: 'Get Current State (subscribe)', value: cfg.topicGetCurrent || '', placeholder: `paradox/states/partitions/${cfg.name}/current_state` },
+        { group: gid, key: `partition.${cfg.id}.topicTamper`, title: 'Get Status Tampered (subscribe)', value: cfg.topicTamper || '' },
+        { group: gid, key: `partition.${cfg.id}.topicOnline`, title: 'Get Online (subscribe)', value: cfg.topicOnline || '' },
+        { group: gid, key: `partition.${cfg.id}.remove`, title: 'Remove partition', type: 'boolean' },
+      );
+    }
 
     // ---- UI Add Sensor ----
     out.push(
@@ -543,6 +677,64 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
 
     // update runtime flags every time
     updateRuntimeFromStorage((k) => this.storage.getItem(k) || '');
+
+    // --- Add Partition workflow ---
+    if (key === 'newPartition.create' && String(value) === 'true') {
+      const id = (this.storage.getItem('newPartition.id') || '').trim();
+      const name = (this.storage.getItem('newPartition.name') || '').trim() || id;
+
+      if (!id) { this.console.warn('Create partition: missing id'); return; }
+      if (this.partitionsCfg.find(p => p.id === id)) { this.console.warn('Create partition: id already exists'); return; }
+
+      this.partitionsCfg.push({
+        id,
+        name,
+        topicSetTarget: (this.storage.getItem('newPartition.topicSetTarget') || '').trim(),
+        topicGetTarget: (this.storage.getItem('newPartition.topicGetTarget') || '').trim(),
+        topicGetCurrent: (this.storage.getItem('newPartition.topicGetCurrent') || '').trim(),
+        topicTamper: (this.storage.getItem('newPartition.topicTamper') || '').trim(),
+        topicOnline: (this.storage.getItem('newPartition.topicOnline') || '').trim(),
+      });
+      this.savePartitionsToStorage();
+
+      for (const k of ['id', 'name', 'topicSetTarget', 'topicGetTarget', 'topicGetCurrent', 'topicTamper', 'topicOnline', 'create'])
+        this.storage.removeItem(`newPartition.${k}`);
+
+      await this.discoverDevices();
+      await this.connectMqtt(true);
+      return;
+    }
+
+    // --- Edit/Remove existing partition ---
+    const pm = key.match(/^partition\.([^\.]+)\.(.+)$/);
+    if (pm) {
+      const pid = pm[1];
+      const prop = pm[2] as keyof PartitionConfig | 'remove';
+      const cfg = this.partitionsCfg.find(p => p.id === pid);
+      if (!cfg) { this.console.warn('putSetting: partition not found', pid); return; }
+
+      if (prop === 'remove' && String(value) === 'true') {
+        this.partitionsCfg = this.partitionsCfg.filter(p => p.id !== pid);
+        this.savePartitionsToStorage();
+        try {
+          this.devices.delete(`partition:${pid}`);
+          deviceManager.onDeviceRemoved?.(`partition:${pid}`);
+        } catch {}
+        this.storage.removeItem(key);
+
+        await this.discoverDevices();
+        await this.connectMqtt(true);
+        return;
+      }
+
+      if (prop === 'name') cfg.name = String(value).trim() || cfg.id;
+      else if (prop !== 'id' && prop !== 'remove') (cfg as any)[prop] = String(value).trim();
+
+      this.savePartitionsToStorage();
+      await this.discoverDevices();
+      await this.connectMqtt(true);
+      return;
+    }
 
     // --- Add Sensor workflow ---
     if (key === 'new.create' && String(value) === 'true') {
@@ -627,6 +819,16 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     const existing = this.devices.get(nativeId);
     if (existing) return existing;
 
+    if (nativeId.startsWith('partition:')) {
+      const pid = nativeId.substring('partition:'.length);
+      const cfg = this.partitionsCfg.find(p => p.id === pid);
+      if (!cfg) return undefined;
+
+      const dev = new PartitionMqttSecuritySystem(nativeId, cfg, this);
+      this.devices.set(nativeId, dev);
+      return dev;
+    }
+
     if (nativeId.startsWith('sensor:')) {
       const sid = nativeId.substring('sensor:'.length);
       const cfg = this.sensorsCfg.find(s => s.id === sid);
@@ -697,6 +899,27 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     this.migrateBypassFromStorage();
   }
 
+  private loadPartitionsFromStorage() {
+    try {
+      const raw = this.storage.getItem('partitionsJson') || '[]';
+      const parsed: PartitionConfig[] = JSON.parse(raw);
+      this.partitionsCfg = (Array.isArray(parsed) ? parsed : [])
+        .filter(x => x && x.id && x.name)
+        .map(x => ({
+          id: String(x.id),
+          name: String(x.name),
+          topicSetTarget: String(x.topicSetTarget || '').trim(),
+          topicGetTarget: String(x.topicGetTarget || '').trim(),
+          topicGetCurrent: String(x.topicGetCurrent || '').trim(),
+          topicTamper: String(x.topicTamper || '').trim(),
+          topicOnline: String(x.topicOnline || '').trim(),
+        }));
+    } catch (e) {
+      this.console.error('Invalid partitionsJson:', e);
+      this.partitionsCfg = [];
+    }
+  }
+
   private migrateBypassFromStorage() {
     try {
       const raw = this.storage.getItem('bypassJson') || '[]';
@@ -741,6 +964,20 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     // 1) manifest
     const manifests: any[] = [];
 
+    for (const cfg of this.partitionsCfg) {
+      const interfaces: ScryptedInterface[] = [
+        ScryptedInterface.SecuritySystem,
+        ScryptedInterface.Online,
+      ];
+      if (cfg.topicTamper) interfaces.push(ScryptedInterface.TamperSensor);
+      manifests.push({
+        nativeId: `partition:${cfg.id}`,
+        name: cfg.name,
+        type: ScryptedDeviceType.SecuritySystem,
+        interfaces,
+      });
+    }
+
     for (const cfg of this.sensorsCfg) {
       const nativeId = `sensor:${cfg.id}`;
       const t = cfg.topics || {};
@@ -784,6 +1021,17 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     }
 
     // 3) instantiate/update
+    for (const cfg of this.partitionsCfg) {
+      const nativeId = `partition:${cfg.id}`;
+      let dev = this.devices.get(nativeId);
+      if (!dev) {
+        dev = new PartitionMqttSecuritySystem(nativeId, cfg, this);
+        this.devices.set(nativeId, dev);
+      } else {
+        (dev as PartitionMqttSecuritySystem).updateConfig(cfg);
+      }
+    }
+
     for (const cfg of this.sensorsCfg) {
       const nativeId = `sensor:${cfg.id}`;
       let dev = this.devices.get(nativeId);
@@ -866,6 +1114,13 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
       if (v) subs.add(v);
     }
 
+    // partitions
+    for (const p of this.partitionsCfg) {
+      [p.topicGetTarget, p.topicGetCurrent, p.topicTamper, p.topicOnline]
+        .filter((x) => !!x && String(x).trim().length > 0)
+        .forEach(x => subs.add(String(x)));
+    }
+
     // sensors
     for (const s of this.sensorsCfg) {
       const t = s.topics || {};
@@ -928,6 +1183,11 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
 
         if (RUNTIME.logMqttAll) this.console.log(`[MQTT] ${topic} -> "${p}"`);
 
+        for (const dev of this.devices.values()) {
+          if (dev instanceof PartitionMqttSecuritySystem)
+            dev.handleMqtt(topic, payload);
+        }
+
         // ---- Alarm handling ----
         if (topic === tOnline) {
           if (truthy(np) || np === 'online') { this.online = true;  try { this.onDeviceEvent(ScryptedInterface.Online, true); } catch {} }
@@ -976,8 +1236,10 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
         }
 
         // ---- Device dispatch ----
-        for (const dev of this.devices.values())
+        for (const dev of this.devices.values()) {
+          if (dev instanceof PartitionMqttSecuritySystem) continue;
           dev.handleMqtt(topic, payload);
+        }
 
       } catch (e) {
         this.console.error('MQTT message handler error', e);
@@ -994,17 +1256,21 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
     return { qos, retain };
   }
 
-  private publishSetTarget(payload: string) {
-    const topic = this.storage.getItem('topicSetTarget');
+  publishSetTargetTo(topic: string | undefined, payload: string, label = 'Alarm'): boolean {
     if (!topic || !this.client) {
-      this.console.warn('topicSetTarget or MQTT not configured.');
-      return;
+      this.console.warn(`${label}: target topic or MQTT not configured.`);
+      return false;
     }
     const { qos, retain } = this.getPublishOptions();
     this.client.publish(topic, payload, { qos, retain }, (err?: Error | null) => {
       if (err) this.console.error('publish error', err);
-      else if (RUNTIME.logSensors) this.console.log(`[Alarm] published target "${payload}" to ${topic}`);
+      else if (RUNTIME.logSensors) this.console.log(`[${label}] published target "${payload}" to ${topic}`);
     });
+    return true;
+  }
+
+  private publishSetTarget(payload: string) {
+    this.publishSetTargetTo(this.storage.getItem('topicSetTarget') || '', payload);
   }
 
   publishBypass(cfg: BypassConfig, payload: string): boolean {
@@ -1023,7 +1289,7 @@ class ParadoxMqttSecuritySystem extends ScryptedDeviceBase
   }
 
   /** Payload publish: override -> strict tokens -> default arm_* */
-  private getOutgoing(mode: SecuritySystemMode) {
+  getOutgoing(mode: SecuritySystemMode) {
     const overrides: Record<SecuritySystemMode, string | null> = {
       [SecuritySystemMode.Disarmed]: this.storage.getItem('payloadDisarm') || null,
       [SecuritySystemMode.HomeArmed]: this.storage.getItem('payloadHome')  || null,
