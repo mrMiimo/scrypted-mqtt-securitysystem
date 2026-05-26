@@ -44,14 +44,14 @@ The main plugin device keeps the legacy single-partition alarm topics above. For
 areas/partitions, use **Add Partition** in Settings to create one child **SecuritySystem** per area.
 
 For example:
-- **Casa**
-  - Set Target: `paradox/control/partitions/Casa`
-  - Get Target: `paradox/states/partitions/Casa/target_state`
-  - Get Current: `paradox/states/partitions/Casa/current_state`
-- **Cantina**
-  - Set Target: `paradox/control/partitions/Cantina`
-  - Get Target: `paradox/states/partitions/Cantina/target_state`
-  - Get Current: `paradox/states/partitions/Cantina/current_state`
+- **Area1**
+  - Set Target: `paradox/control/partitions/Area1`
+  - Get Target: `paradox/states/partitions/Area1/target_state`
+  - Get Current: `paradox/states/partitions/Area1/current_state`
+- **Area2**
+  - Set Target: `paradox/control/partitions/Area2`
+  - Get Target: `paradox/states/partitions/Area2/target_state`
+  - Get Current: `paradox/states/partitions/Area2/current_state`
 
 Each partition is exposed as a separate Scrypted security system and can be added separately to HomeKit.
 
